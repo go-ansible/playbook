@@ -246,7 +246,7 @@ func (ec *execCtx) runTaskList(ctx context.Context, tasks []Task, active []strin
 		if task.IsBlock() {
 			active = ec.runBlock(ctx, task, active, pr)
 		} else {
-			active = ec.runSingleTask(ctx, task, active, pr)
+			active = ec.runSingleTask(ctx, task, active, pr, true)
 		}
 	}
 	return active
@@ -355,8 +355,16 @@ func (ec *execCtx) pushRoleVars(active []string, defaults, roleVars map[string]a
 	}
 }
 
-func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string, pr *PlayResult) []string {
-	if !tagsMatch(task.Tags, ec.engine.RunTags, ec.engine.SkipTags) {
+// runSingleTask runs one leaf (non-block) task across active hosts,
+// one goroutine per host. filterTags applies Engine.RunTags/SkipTags —
+// false for a handler run: real Ansible always runs a notified handler
+// regardless of tags (handlers aren't part of tag filtering at all, not
+// merely excluded from tag inheritance — propagateTags already leaves
+// Play.Handlers untouched, but that alone doesn't stop an empty tag set
+// from being excluded whenever RunTags is non-empty, so runHandlers
+// must skip the check entirely).
+func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string, pr *PlayResult, filterTags bool) []string {
+	if filterTags && !tagsMatch(task.Tags, ec.engine.RunTags, ec.engine.SkipTags) {
 		for _, h := range active {
 			ec.report(pr, Result{Host: h, Task: task.Name, Module: task.Module, Skipped: true, Msg: "tags"})
 		}
@@ -715,7 +723,7 @@ func (ec *execCtx) runHandlers(ctx context.Context, order []string, pr *PlayResu
 		if len(toRun) == 0 {
 			continue
 		}
-		ec.runSingleTask(ctx, handler, toRun, pr)
+		ec.runSingleTask(ctx, handler, toRun, pr, false)
 	}
 }
 
