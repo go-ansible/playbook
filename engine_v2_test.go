@@ -137,6 +137,46 @@ func TestEngineTagsSkipTagsFilters(t *testing.T) {
 	}
 }
 
+// TestEngineTagsDoNotFilterHandlers is a regression test: --tags
+// filtering was originally applied uniformly by runSingleTask, which
+// runHandlers also calls — so an untagged handler (the normal case)
+// was silently skipped whenever RunTags was non-empty, even though it
+// had genuinely been notified. Real Ansible always runs a notified
+// handler regardless of tags. Caught by a real end-to-end smoke test
+// with roles+tags+notify together, not by any narrower unit test.
+func TestEngineTagsDoNotFilterHandlers(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: change something
+      tags: [selected]
+      command: "true"
+      changed_when: true
+      notify: my handler
+  handlers:
+    - name: my handler
+      debug: {}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	e.RunTags = []string{"selected"}
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Failed() {
+		t.Fatalf("run failed: %+v", rr.Plays)
+	}
+	for _, r := range resultsFor(rr, "localhost") {
+		if r.Task == "my handler" && r.Skipped {
+			t.Fatal("a notified handler must run regardless of --tags, even though it carries no tags of its own")
+		}
+	}
+}
+
 func TestEngineTagsAlwaysBypassesRunTags(t *testing.T) {
 	pb, err := Parse([]byte(`
 - hosts: all
