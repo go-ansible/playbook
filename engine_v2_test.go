@@ -39,6 +39,40 @@ func resultsFor(rr *RunResult, host string) []Result {
 	return out
 }
 
+// TestEngineMagicVariablesInventoryHostnameAndPlaybookDir is a
+// regression test for a gap found by a real benchmarks run diffing
+// go-ansible's rendered template output against real ansible-core's:
+// inventory_hostname and playbook_dir were never populated, so any
+// playbook referencing them (both are common) silently rendered empty
+// instead of erroring or matching real Ansible.
+func TestEngineMagicVariablesInventoryHostnameAndPlaybookDir(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: check magic vars
+      debug:
+        msg: "{{ inventory_hostname }}|{{ playbook_dir }}"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	e.BaseDir = "/some/playbook/dir"
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Failed() {
+		t.Fatalf("run failed: %+v", rr.Plays)
+	}
+	for _, r := range resultsFor(rr, "localhost") {
+		if r.Task == "check magic vars" && r.Msg != "localhost|/some/playbook/dir" {
+			t.Fatalf("msg = %q, want %q", r.Msg, "localhost|/some/playbook/dir")
+		}
+	}
+}
+
 func TestEngineBlockWhenSkipsWholeBlockIncludingRescueAlways(t *testing.T) {
 	pb, err := Parse([]byte(`
 - hosts: all

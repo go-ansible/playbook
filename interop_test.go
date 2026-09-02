@@ -271,3 +271,52 @@ func TestInteropFailedTaskExitCodeMatchesReference(t *testing.T) {
 		t.Fatal("go-ansible: want the run to be marked failed")
 	}
 }
+
+// TestInteropMagicVariablesMatchReference checks inventory_hostname
+// and playbook_dir render identically on both sides — these were
+// found missing from this engine entirely by a benchmarks run that
+// happened to diff rendered template output against real ansible-core;
+// this makes that comparison a permanent, automated check instead of
+// a one-off finding.
+func TestInteropMagicVariablesMatchReference(t *testing.T) {
+	bin := ansiblePlaybookBin(t)
+
+	for _, engine := range []string{"real", "go"} {
+		dir := t.TempDir()
+		inv := localInventoryFile(t, dir)
+		out := filepath.Join(dir, "magic-vars.txt")
+		pb := writeInteropPlaybook(t, dir, `- hosts: all
+  gather_facts: false
+  tasks:
+    - name: record magic vars
+      copy:
+        content: "{{ inventory_hostname }}|{{ playbook_dir }}"
+        dest: `+out+`
+`)
+		if engine == "real" {
+			if _, code := runRealAnsiblePlaybook(t, bin, inv, pb); code != 0 {
+				t.Fatalf("real ansible-playbook run failed")
+			}
+			data, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			realOut := string(data)
+			if !strings.HasPrefix(realOut, "localhost|"+dir) {
+				t.Fatalf("real ansible-playbook: magic vars = %q, want prefix %q", realOut, "localhost|"+dir)
+			}
+		} else {
+			if rr := runGoAnsiblePlaybook(t, inv, pb); rr.Failed() {
+				t.Fatalf("go-ansible run failed")
+			}
+			data, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			goOut := string(data)
+			if goOut != "localhost|"+dir {
+				t.Fatalf("go-ansible: magic vars = %q, want %q", goOut, "localhost|"+dir)
+			}
+		}
+	}
+}
