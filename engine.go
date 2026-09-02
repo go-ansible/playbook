@@ -178,6 +178,12 @@ func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Hos
 	for _, h := range hosts {
 		vc := vars.New()
 		vc.Set(vars.Inventory, e.Inventory.HostVars(h.Name))
+		// inventory_hostname/playbook_dir are Ansible's "magic
+		// variables" — set after HostVars so a literal host_var of the
+		// same name can't shadow them, matching how hard these are to
+		// override in real Ansible.
+		vc.SetVar(vars.Inventory, "inventory_hostname", h.Name)
+		vc.SetVar(vars.Inventory, "playbook_dir", e.BaseDir)
 		vc.Set(vars.ExtraVars, e.ExtraVars)
 		vc.Set(vars.PlayVars, play.Vars)
 		ec.states[h.Name] = &hostState{name: h.Name, vc: vc, notify: map[string]bool{}}
