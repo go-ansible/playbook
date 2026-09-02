@@ -73,6 +73,44 @@ func TestEngineMagicVariablesInventoryHostnameAndPlaybookDir(t *testing.T) {
 	}
 }
 
+// TestEngineSetupTaskFactsUseAnsibleFactsConvention is a regression
+// test found by a real compiled-binary smoke test: an explicit `setup:`
+// task's facts were being merged bare-name-only (set_fact's
+// convention), so `{{ ansible_facts.os_family }}`/`{{ ansible_os_family
+// }}` silently rendered empty after `- setup:` even though the exact
+// same data works fine when gathered automatically via `gather_facts:
+// true`. Real Ansible exposes system facts identically either way.
+func TestEngineSetupTaskFactsUseAnsibleFactsConvention(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - setup: {}
+    - name: check nested form
+      debug:
+        msg: "{{ ansible_facts.os_family | default('MISSING') }}"
+    - name: check flattened alias
+      debug:
+        msg: "{{ ansible_os_family | default('MISSING') }}"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Failed() {
+		t.Fatalf("run failed: %+v", rr.Plays)
+	}
+	for _, r := range resultsFor(rr, "localhost") {
+		if (r.Task == "check nested form" || r.Task == "check flattened alias") && r.Msg == "MISSING" {
+			t.Fatalf("task %q: msg = %q, want a real os_family value after an explicit setup: task", r.Task, r.Msg)
+		}
+	}
+}
+
 func TestEngineBlockWhenSkipsWholeBlockIncludingRescueAlways(t *testing.T) {
 	pb, err := Parse([]byte(`
 - hosts: all

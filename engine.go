@@ -534,12 +534,20 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		})
 
 		// set_fact's/include_vars' variables are accessible by their
-		// own bare name (unlike gathered system facts, which only
-		// appear as ansible_facts.<name> / ansible_<name> — see
-		// InjectFacts) — merged into the existing Facts layer, not
-		// replacing it, so a set_fact after gather_facts doesn't erase
-		// system facts.
-		for k, v := range result.Facts {
+		// own bare name; setup/gather_facts run as an explicit task
+		// (not just the play's automatic gather_facts: step, which
+		// already goes through InjectFacts in connectAndGatherFacts)
+		// must match that same ansible_facts.<name>/ansible_<name>
+		// convention — real Ansible exposes system facts identically
+		// either way, and a bare-name-only setup task would silently
+		// break any template written the normal way. Both cases merge
+		// per-key into the existing Facts layer rather than replacing
+		// it, so neither erases facts the other already set.
+		factVars := result.Facts
+		if task.Module == "setup" || task.Module == "gather_facts" {
+			factVars = vars.InjectFacts(result.Facts)
+		}
+		for k, v := range factVars {
 			st.vc.SetVar(vars.Facts, k, v)
 		}
 	}
