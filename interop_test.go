@@ -320,3 +320,48 @@ func TestInteropMagicVariablesMatchReference(t *testing.T) {
 		}
 	}
 }
+
+// TestInteropImportPlaybookMatchesReference checks that a playbook
+// importing another one via import_playbook: runs every task from
+// both files, on both sides — found missing entirely (only mentioned
+// in a comment, never implemented) by a docs-refresh pass that
+// happened to re-derive the engine feature matrix from the actual
+// code instead of trusting an earlier snapshot.
+func TestInteropImportPlaybookMatchesReference(t *testing.T) {
+	bin := ansiblePlaybookBin(t)
+
+	for _, engine := range []string{"real", "go"} {
+		dir := t.TempDir()
+		inv := localInventoryFile(t, dir)
+		subOut := filepath.Join(dir, "sub-ran.txt")
+		writeInteropPlaybook(t, dir, `- hosts: all
+  gather_facts: false
+  tasks:
+    - name: mark sub ran
+      copy:
+        content: "ran"
+        dest: `+subOut+`
+`)
+		// writeInteropPlaybook always writes "site.yml"; the imported
+		// file needs its own name.
+		subPath := filepath.Join(dir, "sub.yml")
+		if err := os.Rename(filepath.Join(dir, "site.yml"), subPath); err != nil {
+			t.Fatal(err)
+		}
+		pb := writeInteropPlaybook(t, dir, `- import_playbook: sub.yml
+`)
+
+		if engine == "real" {
+			if _, code := runRealAnsiblePlaybook(t, bin, inv, pb); code != 0 {
+				t.Fatalf("real ansible-playbook run failed")
+			}
+		} else {
+			if rr := runGoAnsiblePlaybook(t, inv, pb); rr.Failed() {
+				t.Fatalf("go-ansible run failed: %+v", rr)
+			}
+		}
+		if _, err := os.Stat(subOut); err != nil {
+			t.Fatalf("[%s] imported playbook's task never ran: %v", engine, err)
+		}
+	}
+}
