@@ -111,6 +111,25 @@ func parse(data []byte, baseDir string) (Playbook, error) {
 	ctx := parseCtx{baseDir: baseDir}
 	pb := make(Playbook, 0, len(raw))
 	for i, m := range raw {
+		// import_playbook is a top-level entry shape distinct from a
+		// play (no hosts:, just this one key) — splice the referenced
+		// file's own plays in here, resolved statically at parse time
+		// like import_tasks/import_role. The imported file's own
+		// nested imports/roles/includes resolve relative to ITS OWN
+		// directory, not this playbook's — matching real
+		// ansible-playbook.
+		if path, ok := m["import_playbook"]; ok {
+			pathStr, ok := path.(string)
+			if !ok {
+				return nil, fmt.Errorf("playbook: entry %d: import_playbook: expected a file path string, got %T", i, path)
+			}
+			imported, err := ParseFile(filepath.Join(baseDir, pathStr))
+			if err != nil {
+				return nil, fmt.Errorf("playbook: entry %d: import_playbook %s: %w", i, pathStr, err)
+			}
+			pb = append(pb, imported...)
+			continue
+		}
 		play, err := parsePlay(ctx, m)
 		if err != nil {
 			return nil, fmt.Errorf("playbook: play %d: %w", i, err)

@@ -18,6 +18,64 @@ func writePlaybookFile(t *testing.T, dir, name, content string) string {
 	return path
 }
 
+func TestParseImportPlaybookSplicesPlays(t *testing.T) {
+	dir := t.TempDir()
+	writePlaybookFile(t, dir, "sub.yml", `
+- hosts: web
+  tasks: []
+- hosts: db
+  tasks: []
+`)
+	pbPath := writePlaybookFile(t, dir, "site.yml", `
+- hosts: all
+  tasks: []
+- import_playbook: sub.yml
+`)
+	pb, err := ParseFile(pbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pb) != 3 {
+		t.Fatalf("Playbook has %d plays, want 3 (1 own + 2 imported)", len(pb))
+	}
+	if pb[1].Hosts != "web" || pb[2].Hosts != "db" {
+		t.Fatalf("imported plays = %q, %q, want web, db", pb[1].Hosts, pb[2].Hosts)
+	}
+}
+
+func TestParseImportPlaybookRelativeToOwnDirectory(t *testing.T) {
+	dir := t.TempDir()
+	// sub.yml lives in a subdirectory and itself imports a role — that
+	// role must resolve relative to sub.yml's own directory, not
+	// site.yml's, exactly like import_tasks/roles already do.
+	writePlaybookFile(t, dir, "subdir/roles/r1/tasks/main.yml", "- debug: {}\n")
+	writePlaybookFile(t, dir, "subdir/sub.yml", `
+- hosts: all
+  roles:
+    - r1
+`)
+	pbPath := writePlaybookFile(t, dir, "site.yml", `
+- import_playbook: subdir/sub.yml
+`)
+	pb, err := ParseFile(pbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pb) != 1 || !pb[0].Tasks[0].IsBlock() {
+		t.Fatalf("imported play = %+v", pb)
+	}
+}
+
+func TestParseImportPlaybookMissingFileErrors(t *testing.T) {
+	dir := t.TempDir()
+	pbPath := writePlaybookFile(t, dir, "site.yml", `
+- import_playbook: nope.yml
+`)
+	if _, err := ParseFile(pbPath); err == nil {
+		t.Fatal("want an error for a missing import_playbook target")
+	}
+}
+
 func TestParseStrategyRejectsNonLinear(t *testing.T) {
 	_, err := Parse([]byte(`
 - hosts: all
