@@ -652,3 +652,189 @@ func TestEngineRoleDefaultsVisibleInsideRoleAndRestoredAfter(t *testing.T) {
 		t.Fatalf("after role: msg = %v, want the role default restored/gone once the role's block ends", afterMsg)
 	}
 }
+
+// TestEngineNestedRoleInheritsAndRestoresEnclosingVars locks in the fix
+// for pushRoleVars replacing (instead of merging onto) the enclosing
+// role's RoleDefaults/RoleVars layers: a real ansible-playbook run of
+// this exact fixture (outer role with x in defaults and y/z in vars,
+// inner role included from outer's own tasks with only y in its vars
+// and no defaults/main.yml at all) produces x=outer-default and
+// z=outer-vars-z throughout, y=outer-vars outside inner and
+// y=inner-vars only while inner's own task runs — proving real Ansible
+// keeps every currently active role's defaults/vars in scope at once
+// rather than having an inner role's absence of a key blank it out.
+func TestEngineNestedRoleInheritsAndRestoresEnclosingVars(t *testing.T) {
+	dir := t.TempDir()
+	writePlaybookFile(t, dir, "roles/outer/defaults/main.yml", "x: outer-default\n")
+	writePlaybookFile(t, dir, "roles/outer/vars/main.yml", "y: outer-vars\nz: outer-vars-z\n")
+	writePlaybookFile(t, dir, "roles/outer/tasks/main.yml", `
+- name: outer before
+  debug:
+    msg: "x={{ x }} y={{ y }} z={{ z }}"
+- include_role:
+    name: inner
+- name: outer after
+  debug:
+    msg: "x={{ x }} y={{ y }} z={{ z }}"
+`)
+	writePlaybookFile(t, dir, "roles/inner/vars/main.yml", "y: inner-vars\n")
+	writePlaybookFile(t, dir, "roles/inner/tasks/main.yml", `
+- name: inner task
+  debug:
+    msg: "x={{ x }} y={{ y }} z={{ z }}"
+`)
+	pbPath := writePlaybookFile(t, dir, "site.yml", `
+- hosts: all
+  gather_facts: false
+  roles:
+    - outer
+`)
+	pb, err := ParseFile(pbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Failed() {
+		t.Fatalf("run failed: %+v", rr.Plays)
+	}
+	want := map[string]string{
+		"outer before": "x=outer-default y=outer-vars z=outer-vars-z",
+		"inner task":   "x=outer-default y=inner-vars z=outer-vars-z",
+		"outer after":  "x=outer-default y=outer-vars z=outer-vars-z",
+	}
+	got := map[string]string{}
+	for _, r := range resultsFor(rr, "localhost") {
+		got[r.Task] = r.Msg
+	}
+	for task, wantMsg := range want {
+		if got[task] != wantMsg {
+			t.Errorf("task %q: msg = %q, want %q", task, got[task], wantMsg)
+		}
+	}
+}
+
+// TestEngineRegisterSetFactExposesAnsibleFacts locks in the fix for
+// resultToMap only ever flattening Result.Extra: set_fact (and setup)
+// return their output via Result.Facts instead, so a registered
+// set_fact result was silently missing it entirely. Real Ansible
+// nests it under ansible_facts on the registered result (confirmed
+// against a real ansible-playbook run: `sf_result.keys()` there is
+// exactly ["changed", "failed", "ansible_facts"], and
+// `sf_result.ansible_facts` is the bare {"myvar": "hello"} dict set by
+// set_fact — no msg key, since set_fact doesn't set one).
+func TestEngineRegisterSetFactExposesAnsibleFacts(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: sf
+      set_fact:
+        myvar: hello
+      register: sf_result
+    - name: check
+      debug:
+        msg: "{{ sf_result.ansible_facts.myvar }}"
+      when: sf_result.ansible_facts.myvar is defined
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Failed() {
+		t.Fatalf("run failed: %+v", rr.Plays)
+	}
+	var checkMsg any
+	var checkSkipped bool
+	for _, r := range resultsFor(rr, "localhost") {
+		if r.Task == "check" {
+			checkMsg = r.Msg
+			checkSkipped = r.Skipped
+		}
+	}
+	if checkSkipped {
+		t.Fatal("check task was skipped: sf_result.ansible_facts.myvar was not defined")
+	}
+	if checkMsg != "hello" {
+		t.Fatalf("check: msg = %v, want %q", checkMsg, "hello")
+	}
+}
+
+// TestEngineFreeStrategyRunsHostsIndependently locks in the "free"
+// strategy: a real ansible-playbook run of an equivalent fixture (a
+// fast host with no delay and a slow host that sleeps) shows the fast
+// host completing its ENTIRE task list — including a second task after
+// the sleep — before the slow host's own sleep task even finishes,
+// proving free has no per-task barrier across hosts (unlike linear,
+// where every host must finish task N before any host starts N+1).
+// This drives real local `sleep` commands rather than a fake
+// connection, so the timing difference is genuine.
+func TestEngineFreeStrategyRunsHostsIndependently(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  strategy: free
+  tasks:
+    - name: sleep
+      command: "sleep {{ sleep_secs }}"
+    - name: after sleep
+      debug:
+        msg: done
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv, err := inventory.ParseYAML([]byte(`
+all:
+  hosts:
+    fast:
+      ansible_connection: local
+      sleep_secs: 0
+    slow:
+      ansible_connection: local
+      sleep_secs: 1
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(inv)
+	var mu sync.Mutex
+	var order []string
+	e.OnResult = func(r Result) {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, r.Host+":"+r.Task)
+	}
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Failed() {
+		t.Fatalf("run failed: %+v", rr.Plays)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	fastDoneIdx, slowSleepIdx := -1, -1
+	for i, ev := range order {
+		if ev == "fast:after sleep" {
+			fastDoneIdx = i
+		}
+		if ev == "slow:sleep" {
+			slowSleepIdx = i
+		}
+	}
+	if fastDoneIdx == -1 || slowSleepIdx == -1 {
+		t.Fatalf("missing expected events in recorded order: %v", order)
+	}
+	if fastDoneIdx > slowSleepIdx {
+		t.Fatalf("free strategy should let fast finish its whole task list before slow's first task completes; order = %v", order)
+	}
+}

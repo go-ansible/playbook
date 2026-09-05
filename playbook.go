@@ -31,6 +31,15 @@ type Play struct {
 	Tags         []string
 	Serial       int // 0 means "all hosts at once" (linear strategy default)
 	Roles        []RoleRef
+
+	// Strategy is "linear" (the default: every host finishes task N
+	// before any host starts task N+1) or "free" (each host runs its
+	// entire task list, and its own notified handlers, independently —
+	// a slow host never holds back a fast one). Any other named
+	// strategy real Ansible supports (debug, host_pinned, or a
+	// strategy plugin) is rejected at parse time rather than silently
+	// treated as linear.
+	Strategy string
 }
 
 // RoleRef is one entry of a play's roles: list.
@@ -63,13 +72,15 @@ type Task struct {
 
 	// RoleDefaults/RoleVars are set only on the synthetic block task
 	// produced for a roles: entry or include_role/import_role — the
-	// engine pushes them onto the RoleDefaults/RoleVars layers for the
-	// duration of the block, then restores the prior layer content.
-	// Nested roles (a role that itself includes another role) are not
-	// scoped correctly by this single-level save/restore — documented
-	// limitation, not silently wrong: it's the outer role's vars that
-	// win, matching what would happen if the inner include_role simply
-	// didn't reset the layer.
+	// engine (Engine.pushRoleVars) merges them on top of the
+	// RoleDefaults/RoleVars layers' current content for the duration of
+	// the block, then restores the prior (pre-merge) content. Nesting
+	// (a role that itself includes another role) composes correctly to
+	// any depth this way: a variable the inner role doesn't define in
+	// its own defaults/main.yml or vars/main.yml still resolves to
+	// whatever the enclosing role(s) already had, matching real
+	// Ansible's behavior of keeping every currently active role's
+	// defaults/vars in scope at once.
 	RoleDefaults map[string]any
 	RoleVars     map[string]any
 
@@ -174,8 +185,9 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 	if p.Hosts == "" {
 		return p, fmt.Errorf("play %q: missing required field: hosts", p.Name)
 	}
-	if strategy := str(m["strategy"]); strategy != "" && strategy != "linear" {
-		return p, fmt.Errorf("play %q: strategy %q not supported (only linear)", p.Name, strategy)
+	p.Strategy = strDefault(m["strategy"], "linear")
+	if p.Strategy != "linear" && p.Strategy != "free" {
+		return p, fmt.Errorf("play %q: strategy %q not supported (only linear, free)", p.Name, p.Strategy)
 	}
 
 	var roleHandlers []Task

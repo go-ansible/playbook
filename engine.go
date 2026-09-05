@@ -201,8 +201,39 @@ func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Hos
 	}()
 
 	active := activeHosts(ec.states, order)
+	if play.Strategy == "free" {
+		runFree(ctx, ec, play, active, pr)
+		return
+	}
 	active = ec.runTaskList(ctx, play.Tasks, active, pr)
 	ec.runHandlers(ctx, order, pr)
+}
+
+// runFree implements the "free" strategy: every host runs the play's
+// entire task list, then its own notified handlers, independently and
+// concurrently — unlike linear (the default), a fast host is never
+// held back by a slow one. This reuses runTaskList/runBlock/
+// runSingleTask/runHandlers completely unchanged: each is invoked here
+// with a single-host active/order slice per goroutine instead of the
+// whole batch, so runSingleTask's own goroutine-per-host fan-out (which
+// creates linear's per-task wg.Wait barrier when there are several
+// hosts in the slice) degenerates to one goroutine waiting on itself —
+// exactly the "no cross-host barrier" behavior free needs. Every host
+// already had its own hostState/vars.Context, and PlayResult.record
+// and execCtx.delegateConn are already mutex-guarded for concurrent
+// per-host access, so nothing about running a whole task list per host
+// concurrently (rather than one task at a time across hosts) is new.
+func runFree(ctx context.Context, ec *execCtx, play Play, active []string, pr *PlayResult) {
+	var wg sync.WaitGroup
+	for _, h := range active {
+		wg.Add(1)
+		go func(h string) {
+			defer wg.Done()
+			ec.runTaskList(ctx, play.Tasks, []string{h}, pr)
+			ec.runHandlers(ctx, []string{h}, pr)
+		}(h)
+	}
+	wg.Wait()
 }
 
 func (e *Engine) connectAndGatherFacts(ctx context.Context, play Play, states map[string]*hostState, pr *PlayResult) {
@@ -335,21 +366,30 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 
 // pushRoleVars sets RoleDefaults/RoleVars on every active host for the
 // duration of a role's block, returning a function that restores each
-// host's prior layer content. Single-level only: a role included from
-// inside another role's own tasks leaves the inner role's vars/defaults
-// in place for the rest of the outer role too, since restore only
-// unwinds the layer it pushed — see Task.RoleDefaults/RoleVars.
+// host's prior layer content. A role included from inside another
+// role's own tasks (roles: nesting an include_role/import_role, or one
+// include_role nesting another) merges its own defaults/vars on top of
+// whatever the enclosing role already pushed, rather than replacing it
+// outright — this matches real Ansible, which keeps every currently
+// "active" role's defaults/vars in scope at once (confirmed against a
+// real ansible-playbook run: a variable the inner role does not define
+// in its own defaults/main.yml or vars/main.yml still resolves to the
+// outer role's value while the inner role's tasks run). restore()
+// unwinds back to exactly the merged content the enclosing role had in
+// place before this push, so nesting composes correctly to any depth.
 func (ec *execCtx) pushRoleVars(active []string, defaults, roleVars map[string]any) func() {
 	type saved struct{ defaults, vars map[string]any }
 	prior := make(map[string]saved, len(active))
 	for _, h := range active {
 		st := ec.states[h]
-		prior[h] = saved{defaults: st.vc.Layer(vars.RoleDefaults), vars: st.vc.Layer(vars.RoleVars)}
+		priorDefaults := st.vc.Layer(vars.RoleDefaults)
+		priorVars := st.vc.Layer(vars.RoleVars)
+		prior[h] = saved{defaults: priorDefaults, vars: priorVars}
 		if defaults != nil {
-			st.vc.Set(vars.RoleDefaults, defaults)
+			st.vc.Set(vars.RoleDefaults, mergeOnto(priorDefaults, defaults))
 		}
 		if roleVars != nil {
-			st.vc.Set(vars.RoleVars, roleVars)
+			st.vc.Set(vars.RoleVars, mergeOnto(priorVars, roleVars))
 		}
 	}
 	return func() {
@@ -359,6 +399,21 @@ func (ec *execCtx) pushRoleVars(active []string, defaults, roleVars map[string]a
 			st.vc.Set(vars.RoleVars, prior[h].vars)
 		}
 	}
+}
+
+// mergeOnto returns a new map holding base's entries overlaid with
+// overlay's (overlay wins on a shared key), without mutating either
+// argument — both may still be a live layer map or a role's parsed
+// content, neither of which pushRoleVars owns.
+func mergeOnto(base, overlay map[string]any) map[string]any {
+	out := make(map[string]any, len(base)+len(overlay))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range overlay {
+		out[k] = v
+	}
+	return out
 }
 
 // runSingleTask runs one leaf (non-block) task across active hosts,
@@ -561,6 +616,17 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		regValue["failed"] = anyFailed
 		if lastResult.Msg != "" {
 			regValue["msg"] = lastResult.Msg
+		}
+		// setup/gather_facts and set_fact/include_vars put their
+		// output in Result.Facts, not Result.Extra — resultToMap
+		// (source of lastExtra) only ever flattens Extra, so without
+		// this a registered setup/set_fact result would be missing
+		// its facts entirely. Real Ansible's own registered-result
+		// shape nests them under ansible_facts either way (confirmed
+		// against a real ansible-playbook run for both modules), so
+		// match that key rather than exposing them bare.
+		if len(lastResult.Facts) > 0 {
+			regValue["ansible_facts"] = lastResult.Facts
 		}
 		st.vc.SetVar(vars.Registered, task.Register, regValue)
 	}

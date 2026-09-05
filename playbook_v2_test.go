@@ -76,14 +76,32 @@ func TestParseImportPlaybookMissingFileErrors(t *testing.T) {
 	}
 }
 
-func TestParseStrategyRejectsNonLinear(t *testing.T) {
+// TestParseStrategyRejectsUnsupported covers a strategy real Ansible
+// has (debug) that this port does not implement — free is now
+// supported (TestParseStrategyFreeAccepted), so it no longer belongs
+// in this rejection test.
+func TestParseStrategyRejectsUnsupported(t *testing.T) {
 	_, err := Parse([]byte(`
 - hosts: all
-  strategy: free
+  strategy: debug
   tasks: []
 `))
 	if err == nil {
 		t.Fatal("want an error for an unsupported strategy")
+	}
+}
+
+func TestParseStrategyFreeAccepted(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  strategy: free
+  tasks: []
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pb[0].Strategy != "free" {
+		t.Fatalf("Strategy = %q, want %q", pb[0].Strategy, "free")
 	}
 }
 
