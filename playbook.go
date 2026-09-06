@@ -41,6 +41,33 @@ type Play struct {
 	// strategy plugin) is rejected at parse time rather than silently
 	// treated as linear.
 	Strategy string
+
+	// VarsPrompt, resolved once per play (not per host) before its
+	// tasks run — see Engine.applyVarsPrompt — into an ordinary play
+	// var, same scope as Vars. Real Ansible only accepts a list of
+	// maps here, never a bare-string shorthand (confirmed from
+	// ansible-core's own Play._load_vars_prompt/preprocess_vars: an
+	// item that isn't a mapping raises a parse error there too).
+	VarsPrompt []VarPrompt
+}
+
+// VarPrompt is one vars_prompt entry. Prompt defaults to Name when
+// empty, Private defaults to true (confirmed from ansible-core's own
+// playbook_executor.py: private = boolean(var.get("private", True)) —
+// prompts hide input UNLESS private: false is explicit, the opposite
+// of what the name alone might suggest). encrypt/salt/salt_size/unsafe
+// (hashing the prompted value, and disabling template-escaping of it)
+// are real ansible-core vars_prompt keys this port does not implement
+// — accepted and parsed for shape compatibility, silently no-op'd
+// rather than erroring on an unrecognized key, since a real playbook
+// using only the common name/prompt/default/private/confirm subset
+// (the overwhelming majority) should not need every knob wired to run.
+type VarPrompt struct {
+	Name    string
+	Prompt  string
+	Default string
+	Private bool
+	Confirm bool
 }
 
 // RoleRef is one entry of a play's roles: list.
@@ -198,7 +225,7 @@ var playReservedKeys = map[string]bool{
 	"name": true, "hosts": true, "gather_facts": true, "become": true,
 	"become_user": true, "become_method": true, "vars": true, "vars_files": true,
 	"tasks": true, "handlers": true, "roles": true, "tags": true, "serial": true,
-	"strategy": true, "pre_tasks": true, "post_tasks": true,
+	"strategy": true, "pre_tasks": true, "post_tasks": true, "vars_prompt": true,
 }
 
 func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
@@ -262,7 +289,52 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 
 	propagateTags(p.Tags, p.Tasks)
 
+	if rawPrompts, ok := m["vars_prompt"]; ok {
+		p.VarsPrompt, err = parseVarsPrompt(rawPrompts)
+		if err != nil {
+			return p, fmt.Errorf("vars_prompt: %w", err)
+		}
+	}
+
 	return p, nil
+}
+
+// parseVarsPrompt matches ansible-core's own Play._load_vars_prompt +
+// preprocess_vars exactly: a single mapping is treated as a one-item
+// list, but every item must be a mapping with at least "name" — there
+// is no bare-string shorthand, an item that isn't a mapping is a parse
+// error there too, not silently accepted.
+func parseVarsPrompt(v any) ([]VarPrompt, error) {
+	var items []any
+	switch val := v.(type) {
+	case []any:
+		items = val
+	case map[string]any:
+		items = []any{val}
+	case nil:
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("expected a list or a mapping, got %T", v)
+	}
+	out := make([]VarPrompt, 0, len(items))
+	for i, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("item %d: expected a mapping, got %T", i, item)
+		}
+		name := str(m["name"])
+		if name == "" {
+			return nil, fmt.Errorf("item %d: missing required key: name", i)
+		}
+		out = append(out, VarPrompt{
+			Name:    name,
+			Prompt:  str(m["prompt"]),
+			Default: str(m["default"]),
+			Private: boolDefault(m["private"], true),
+			Confirm: boolDefault(m["confirm"], false),
+		})
+	}
+	return out, nil
 }
 
 // propagateTags computes each task's effective tag set — its own tags
