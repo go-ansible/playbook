@@ -433,10 +433,23 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 		return active
 	}
 
+	// run_once: execute on only the first active host — matching real
+	// Ansible, the rest get no report at all for this task (not even a
+	// Skipped one), and simply pass through as still-active. Only
+	// restricts anything when active has more than one host to begin
+	// with; under strategy: free, active is always exactly one host
+	// here (see runFree), so this is a no-op there — see Task.RunOnce.
+	runOn := active
+	var passthrough []string
+	if task.RunOnce && len(active) > 1 {
+		runOn = active[:1]
+		passthrough = active[1:]
+	}
+
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var stillActive []string
-	for _, h := range active {
+	for _, h := range runOn {
 		wg.Add(1)
 		go func(h string) {
 			defer wg.Done()
@@ -452,6 +465,26 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 		}(h)
 	}
 	wg.Wait()
+
+	if len(passthrough) > 0 {
+		// Broadcast the run_once result to every other active host, so
+		// a later task on ANY of them can still read it by bare name —
+		// verified against a real ansible-playbook run (register: on a
+		// run_once task is visible on every host, not just the one that
+		// actually ran it). A failure on the executing host does not
+		// propagate to the others: real Ansible only marks the host
+		// that actually ran the task as failed.
+		executor := ec.states[runOn[0]]
+		if task.Register != "" {
+			if regValue, ok := executor.vc.Get(task.Register); ok {
+				for _, h := range passthrough {
+					ec.states[h].vc.SetVar(vars.Registered, task.Register, regValue)
+				}
+			}
+		}
+		stillActive = append(stillActive, passthrough...)
+	}
+
 	return stillActive
 }
 

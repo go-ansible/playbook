@@ -1015,3 +1015,60 @@ func TestEngineRetriesWithoutUntilRetriesOnFailure(t *testing.T) {
 		}
 	}
 }
+
+// TestEngineRunOnceExecutesOnceAndBroadcastsRegister locks in run_once,
+// verified against a real ansible-playbook run of an equivalent
+// fixture: the task's module actually runs on only the first active
+// host, but its registered result is visible on every host in a later
+// task, not just the one that ran it.
+func TestEngineRunOnceExecutesOnceAndBroadcastsRegister(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: run once task
+      debug:
+        msg: "hello-{{ inventory_hostname }}"
+      run_once: true
+      register: r
+    - name: report
+      debug:
+        msg: "host={{ inventory_hostname }} got={{ r.msg }}"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(multiHostInventory(t, 3))
+	var mu sync.Mutex
+	var ranOn []string
+	e.OnResult = func(r Result) {
+		if r.Task == "run once task" {
+			mu.Lock()
+			ranOn = append(ranOn, r.Host)
+			mu.Unlock()
+		}
+	}
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Failed() {
+		t.Fatalf("run failed: %+v", rr.Plays)
+	}
+	if len(ranOn) != 1 {
+		t.Fatalf("run once task executed on %d hosts (%v), want exactly 1", len(ranOn), ranOn)
+	}
+	executor := ranOn[0]
+	for _, h := range []string{"h1", "h2", "h3"} {
+		var reportMsg any
+		for _, r := range resultsFor(rr, h) {
+			if r.Task == "report" {
+				reportMsg = r.Msg
+			}
+		}
+		want := fmt.Sprintf("host=%s got=hello-%s", h, executor)
+		if reportMsg != want {
+			t.Errorf("host %s: reportMsg = %v, want %q", h, reportMsg, want)
+		}
+	}
+}
