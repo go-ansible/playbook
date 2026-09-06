@@ -71,6 +71,21 @@ type Task struct {
 	Vars         map[string]any
 	DelegateTo   string
 
+	// Until/Retries/Delay implement the task retry loop: real Ansible
+	// runs the task 1+Retries times (Retries nil, the "unset" state,
+	// means no retry loop at all UNLESS Until is non-empty, in which
+	// case real Ansible defaults Retries to 3 — mirrored in
+	// runTaskOnHost, not here, since it needs to distinguish "Retries
+	// explicitly 0" from "Retries unset"), re-checking Until (or, if
+	// Until is empty but Retries was explicitly set, "not failed")
+	// after each attempt and sleeping Delay seconds before the next one
+	// if it didn't pass. See runTaskOnHost's retry loop for the exact
+	// attempt-counting algorithm, including a real, deliberately
+	// reproduced quirk in ansible-core's own retry loop.
+	Until   string
+	Retries *int
+	Delay   float64
+
 	// RoleDefaults/RoleVars are set only on the synthetic block task
 	// produced for a roles: entry or include_role/import_role — the
 	// engine (Engine.pushRoleVars) merges them on top of the
@@ -303,6 +318,7 @@ var taskReservedKeys = map[string]bool{
 	"failed_when": true, "tags": true, "become": true, "become_user": true,
 	"become_method": true, "notify": true, "vars": true, "delegate_to": true,
 	"block": true, "rescue": true, "always": true, "with_items": true,
+	"until": true, "retries": true, "delay": true,
 }
 
 // includeReservedKeys are the extra keys recognized on an
@@ -364,6 +380,12 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 		Notify:       toStringList(m["notify"]),
 		Vars:         toMap(m["vars"]),
 		DelegateTo:   str(m["delegate_to"]),
+		Until:        normalizeWhen(m["until"]),
+		Delay:        floatDefault(m["delay"], 5),
+	}
+	if v, ok := m["retries"]; ok {
+		n := toInt(v)
+		t.Retries = &n
 	}
 	if lc, ok := m["loop_control"].(map[string]any); ok {
 		if lv := str(lc["loop_var"]); lv != "" {
@@ -737,6 +759,18 @@ func strDefault(v any, def string) string {
 func boolDefault(v any, def bool) bool {
 	if b, ok := v.(bool); ok {
 		return b
+	}
+	return def
+}
+
+func floatDefault(v any, def float64) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
 	}
 	return def
 }

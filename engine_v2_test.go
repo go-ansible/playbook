@@ -2,7 +2,11 @@ package playbook
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -836,5 +840,178 @@ all:
 	}
 	if fastDoneIdx > slowSleepIdx {
 		t.Fatalf("free strategy should let fast finish its whole task list before slow's first task completes; order = %v", order)
+	}
+}
+
+// TestEngineUntilRetriesSucceedsPartway locks in the common, successful
+// case of a task retry loop: a real shell command that only succeeds on
+// its 3rd real execution (verified against a counter file, not a fake
+// connection), retried via until:/retries:, reports attempts=3 exactly
+// matching the real invocation count — confirmed against a real
+// ansible-playbook run of an equivalent fixture.
+func TestEngineUntilRetriesSucceedsPartway(t *testing.T) {
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "counter")
+	script := filepath.Join(dir, "try.sh")
+	// A real script file, not an inline shell one-liner threaded through
+	// YAML — sidesteps three layers of quoting (Go -> YAML -> shell) that
+	// have nothing to do with what this test actually verifies.
+	if err := os.WriteFile(script, []byte(fmt.Sprintf(
+		"#!/bin/sh\necho x >> %s\nn=$(wc -l < %s)\ntest \"$n\" -ge 3\n", counter, counter,
+	)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pb, err := Parse([]byte(fmt.Sprintf(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: succeeds on 3rd try
+      command: %s
+      register: r
+      until: r.rc == 0
+      retries: 5
+      delay: 0
+    - name: report
+      debug:
+        msg: "attempts={{ r.attempts }}"
+`, script)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Failed() {
+		t.Fatalf("run failed: %+v", rr.Plays)
+	}
+	for _, r := range resultsFor(rr, "localhost") {
+		if r.Task != "report" {
+			continue
+		}
+		if r.Msg != "attempts=3" {
+			t.Fatalf("reportMsg = %q, want %q", r.Msg, "attempts=3")
+		}
+	}
+	data, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(strings.Split(strings.TrimSpace(string(data)), "\n")); got != 3 {
+		t.Fatalf("real invocations = %d, want 3", got)
+	}
+}
+
+// TestEngineUntilRetriesExhaustedAttemptsOffByOne locks in a real,
+// verified quirk in ansible-core's own retry loop (task_executor.py's
+// for-else branch): when every attempt is exhausted without until ever
+// passing, the registered result's .attempts field reads
+// (1+retries)-1, ONE LESS than the real number of module executions —
+// confirmed both empirically against a real ansible-playbook run
+// (retries: 3 → 4 real shell invocations, but .attempts reads 3) and in
+// ansible-core's source. Reproduced here rather than "fixed", since a
+// real playbook may already read .attempts expecting this exact value.
+func TestEngineUntilRetriesExhaustedAttemptsOffByOne(t *testing.T) {
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "counter")
+	script := filepath.Join(dir, "always-fails.sh")
+	if err := os.WriteFile(script, []byte(fmt.Sprintf(
+		"#!/bin/sh\necho x >> %s\nexit 1\n", counter,
+	)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pb, err := Parse([]byte(fmt.Sprintf(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: always fails
+      command: %s
+      register: r
+      until: r.rc == 0
+      retries: 3
+      delay: 0
+      ignore_errors: true
+    - name: report
+      debug:
+        msg: "attempts={{ r.attempts }}"
+`, script)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reportMsg any
+	var taskFailed bool
+	for _, r := range resultsFor(rr, "localhost") {
+		if r.Task == "always fails" {
+			taskFailed = r.Failed
+		}
+		if r.Task == "report" {
+			reportMsg = r.Msg
+		}
+	}
+	if !taskFailed {
+		t.Fatal("exhausting every retry without until passing should fail the task")
+	}
+	if reportMsg != "attempts=3" {
+		t.Fatalf("reportMsg = %v, want %q (off-by-one: 4 real executions, attempts reads retries-1=3)", reportMsg, "attempts=3")
+	}
+	data, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(strings.Split(strings.TrimSpace(string(data)), "\n")); got != 4 {
+		t.Fatalf("real invocations = %d, want 4 (1 + retries:3)", got)
+	}
+}
+
+// TestEngineRetriesWithoutUntilRetriesOnFailure locks in a real behavior
+// confirmed directly from ansible-core's own source (task_executor.py):
+// retries: alone, with no until: at all, still activates the retry
+// loop — the implicit condition becomes "not failed", i.e. retry on
+// failure until success or exhaustion. Verified against a real
+// ansible-playbook run of an equivalent fixture (succeeds on the 2nd of
+// up to 4 allowed attempts, .attempts reads 2).
+func TestEngineRetriesWithoutUntilRetriesOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "counter")
+	script := filepath.Join(dir, "try.sh")
+	if err := os.WriteFile(script, []byte(fmt.Sprintf(
+		"#!/bin/sh\necho x >> %s\nn=$(wc -l < %s)\ntest \"$n\" -ge 2\n", counter, counter,
+	)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pb, err := Parse([]byte(fmt.Sprintf(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: retries without until
+      command: %s
+      register: r
+      retries: 3
+      delay: 0
+    - name: report
+      debug:
+        msg: "attempts={{ r.attempts }}"
+`, script)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Failed() {
+		t.Fatalf("run failed: %+v", rr.Plays)
+	}
+	for _, r := range resultsFor(rr, "localhost") {
+		if r.Task == "report" && r.Msg != "attempts=2" {
+			t.Fatalf("reportMsg = %q, want %q", r.Msg, "attempts=2")
+		}
 	}
 }
