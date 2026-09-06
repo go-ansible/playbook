@@ -31,12 +31,14 @@ type Connector func(ctx context.Context, hostName string, hostVars map[string]an
 // Three of these settings — remote_user, host_key_checking, timeout —
 // match real Ansible's own config precedence: an inventory/host var
 // wins if set, otherwise an ANSIBLE_* environment variable if set,
-// otherwise the compiled-in default below. (forks is a fourth setting
-// on the same env-var-over-default precedence, minus the host-var
-// layer — see Engine.Forks/ConfigDefaults — since it's a global
-// concurrency cap, not a per-host connection detail, so it doesn't
-// belong in this function's own resolution chain.) This port has no
-// ansible.cfg file support at all (a real, stated gap — see
+// otherwise ansible.cfg's [defaults] section (see configFileValue) if
+// it sets the matching key, otherwise the compiled-in default below.
+// (forks is a fourth setting on the same precedence, minus the
+// host-var layer — see Engine.Forks/ConfigDefaults — since it's a
+// global concurrency cap, not a per-host connection detail, so it
+// doesn't belong in this function's own resolution chain.) These four
+// settings are the full extent of this port's ansible.cfg support — no
+// other section or key is read at all (a real, stated gap — see
 // go-ansible/cli's ansible-config, which reports exactly this
 // precedence and these four settings, nothing more). Unlike real
 // Ansible's lenient boolean parsing (yes/no/on/off/1/0/true/false,
@@ -70,12 +72,19 @@ func DefaultConnect(ctx context.Context, hostName string, hostVars map[string]an
 	return conn, nil
 }
 
-// envStr, envBool, and envInt read an ANSIBLE_* environment variable
-// as the fallback default for one of DefaultConnect's settings — the
-// middle rung of the precedence chain (host var > env var > compiled-
-// in default) noted on DefaultConnect's own doc comment.
+// envStr, envBool, and envInt read an ANSIBLE_* environment variable,
+// falling back to ansible.cfg's [defaults] section (see
+// configFileValue/cfgKey) and then the compiled-in default — the
+// middle two rungs of the precedence chain (host var > env var >
+// ansible.cfg file > compiled-in default) noted on DefaultConnect's
+// own doc comment. Real Ansible's own precedence has the env var win
+// over the config file every time, which is why the env-var check
+// comes first in each of these rather than the other way around.
 func envStr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	if v, ok := configFileValue(cfgKey(key)); ok && v != "" {
 		return v
 	}
 	return def
@@ -87,11 +96,21 @@ func envBool(key string, def bool) bool {
 			return b
 		}
 	}
+	if v, ok := configFileValue(cfgKey(key)); ok {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
+	}
 	return def
 }
 
 func envInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	if v, ok := configFileValue(cfgKey(key)); ok {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
@@ -113,9 +132,10 @@ type ConfigSetting struct {
 }
 
 // ConfigDefaults reports every setting this package honors from the
-// environment — go-ansible/cli's ansible-config is a thin printer over
-// this. This is the full list: go-ansible has no ansible.cfg file
-// support and reads no other ANSIBLE_* variables anywhere in the org.
+// environment and ansible.cfg's [defaults] section — go-ansible/cli's
+// ansible-config is a thin printer over this. This is the full list:
+// go-ansible reads no other ansible.cfg section or key, and no other
+// ANSIBLE_* variable, anywhere in the org.
 func ConfigDefaults() []ConfigSetting {
 	return []ConfigSetting{
 		{

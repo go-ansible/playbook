@@ -2,6 +2,7 @@ package playbook
 
 import (
 	"context"
+	"os"
 	"testing"
 )
 
@@ -98,5 +99,88 @@ func TestDefaultConnectHonorsEnvTimeout(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("want a connect error against a port nothing listens on")
+	}
+}
+
+// isolateConfigDiscovery points every ansible.cfg discovery location
+// (cwd and $HOME) at fresh, empty temp directories and clears
+// $ANSIBLE_CONFIG, so a test's own real-file assertions can't be
+// affected by whatever happens to exist on the machine actually
+// running the test (there's nothing on this workstation today, but a
+// test that only passes by accident of the current machine's state
+// isn't one to keep).
+func isolateConfigDiscovery(t *testing.T) {
+	t.Helper()
+	t.Setenv("ANSIBLE_CONFIG", "")
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+}
+
+// TestAnsibleCfgFileIsReadWhenEnvVarUnset locks in ansible.cfg [defaults]
+// support, verified against a real `ansible-config dump` run of an
+// equivalent fixture first: remote_user/timeout come from the file when
+// no env var overrides them.
+func TestAnsibleCfgFileIsReadWhenEnvVarUnset(t *testing.T) {
+	isolateConfigDiscovery(t)
+	if err := os.WriteFile("ansible.cfg", []byte("[defaults]\nremote_user = cfguser\ntimeout = 42\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := envStr("ANSIBLE_REMOTE_USER", "fallback"); got != "cfguser" {
+		t.Fatalf("envStr = %q, want cfguser", got)
+	}
+	if got := envInt("ANSIBLE_TIMEOUT", 10); got != 42 {
+		t.Fatalf("envInt = %d, want 42", got)
+	}
+}
+
+// TestAnsibleCfgEnvVarWinsOverFile locks in real Ansible's own
+// precedence (verified against a real ansible-config dump run): the
+// env var wins over ansible.cfg every time, not just when the file is
+// entirely absent.
+func TestAnsibleCfgEnvVarWinsOverFile(t *testing.T) {
+	isolateConfigDiscovery(t)
+	if err := os.WriteFile("ansible.cfg", []byte("[defaults]\nremote_user = cfguser\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANSIBLE_REMOTE_USER", "envuser")
+	if got := envStr("ANSIBLE_REMOTE_USER", "fallback"); got != "envuser" {
+		t.Fatalf("envStr = %q, want envuser (env var must win over the config file)", got)
+	}
+}
+
+func TestAnsibleCfgHostKeyCheckingBoolean(t *testing.T) {
+	isolateConfigDiscovery(t)
+	if err := os.WriteFile("ansible.cfg", []byte("[defaults]\nhost_key_checking = false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := envBool("ANSIBLE_HOST_KEY_CHECKING", true); got != false {
+		t.Fatalf("envBool = %v, want false", got)
+	}
+}
+
+func TestAnsibleCfgIgnoresOtherSections(t *testing.T) {
+	isolateConfigDiscovery(t)
+	if err := os.WriteFile("ansible.cfg", []byte("[privilege_escalation]\nremote_user = wrongsection\n[defaults]\nremote_user = rightsection\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := envStr("ANSIBLE_REMOTE_USER", "fallback"); got != "rightsection" {
+		t.Fatalf("envStr = %q, want rightsection (a key outside [defaults] must not apply)", got)
+	}
+}
+
+func TestConfigFilePathNoneFound(t *testing.T) {
+	isolateConfigDiscovery(t)
+	if got := ConfigFilePath(); got != "" {
+		t.Fatalf("ConfigFilePath = %q, want empty with no ansible.cfg anywhere", got)
+	}
+}
+
+func TestConfigFileValueForEnvMissingKey(t *testing.T) {
+	isolateConfigDiscovery(t)
+	if err := os.WriteFile("ansible.cfg", []byte("[defaults]\ntimeout = 42\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ConfigFileValueForEnv("ANSIBLE_REMOTE_USER"); ok {
+		t.Fatal("ConfigFileValueForEnv: want not-ok for a key the file doesn't set")
 	}
 }
