@@ -643,6 +643,79 @@ func intersects(a, b []string) bool {
 	return false
 }
 
+// runAsyncTask implements async:/poll: for a command/shell task —
+// see Task.Async's doc comment for the scope (command/shell only) and
+// modules.AsyncLaunch's for the one disclosed limitation (no active
+// kill on an overrunning job; this loop still gives up and reports a
+// timeout failure once task.Async seconds pass, it just can't reach
+// out and stop the job on the target the way real Ansible's wrapper
+// does).
+func (ec *execCtx) runAsyncTask(ctx context.Context, task Task, conn remoteexec.Connection, args map[string]any) modules.Result {
+	if task.Module != "command" && task.Module != "shell" {
+		return modules.Fail(fmt.Sprintf(
+			"async: is only supported for command/shell in this port — %s's work happens as a sequence of calls from the control node, not one remote invocation that could be backgrounded on the target the way async requires",
+			task.Module))
+	}
+	cmdLine, skip, skipMsg, err := modules.ComposeCommandLine(ctx, conn, task.Module, args)
+	if err != nil {
+		return modules.Fail(err.Error())
+	}
+	if skip {
+		return modules.Ok(skipMsg)
+	}
+	jid, err := modules.AsyncLaunch(ctx, conn, cmdLine)
+	if err != nil {
+		return modules.Fail(err.Error())
+	}
+
+	pollInterval := 15 // real Ansible's own DEFAULT_POLL_INTERVAL
+	if task.Poll != nil {
+		pollInterval = *task.Poll
+	}
+	if pollInterval <= 0 {
+		// Fire-and-forget: a later async_status: jid=... task can check
+		// on it (see modules.moduleAsyncStatus).
+		return modules.Result{Changed: true}.
+			WithExtra("ansible_job_id", jid).
+			WithExtra("started", true).
+			WithExtra("finished", false)
+	}
+
+	deadline := time.Now().Add(time.Duration(task.Async) * time.Second)
+	for {
+		select {
+		case <-ctx.Done():
+			return modules.Fail("async: cancelled while waiting for job " + jid)
+		case <-time.After(time.Duration(pollInterval) * time.Second):
+		}
+		found, done, rc, stdout, stderr, err := modules.AsyncCheck(ctx, conn, jid)
+		if err != nil {
+			return modules.Fail(err.Error())
+		}
+		if !found {
+			return modules.Fail("async: job " + jid + " disappeared while waiting for it")
+		}
+		if done {
+			r := modules.Result{Changed: true, Failed: rc != 0}
+			if r.Failed {
+				r.Msg = fmt.Sprintf("non-zero return code: %d", rc)
+			}
+			return r.WithExtra("ansible_job_id", jid).
+				WithExtra("started", true).
+				WithExtra("finished", true).
+				WithExtra("rc", rc).
+				WithExtra("stdout", stdout).
+				WithExtra("stderr", stderr)
+		}
+		if time.Now().After(deadline) {
+			return modules.Fail("async: timeout exceeded, job " + jid + " is still running").
+				WithExtra("ansible_job_id", jid).
+				WithExtra("started", true).
+				WithExtra("finished", false)
+		}
+	}
+}
+
 // runTaskOnHost runs task on one host (once per loop item, if looping)
 // and reports whether the host should be excluded from the rest of the
 // play (a failure not covered by ignore_errors).
@@ -749,10 +822,14 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 					aborted = true
 					break
 				}
-				var rerr error
-				result, rerr = ec.engine.Modules.Run(ctx, task.Module, conn, args)
-				if rerr != nil {
-					result = modules.Fail(rerr.Error())
+				if task.Async > 0 {
+					result = ec.runAsyncTask(ctx, task, conn, args)
+				} else {
+					var rerr error
+					result, rerr = ec.engine.Modules.Run(ctx, task.Module, conn, args)
+					if rerr != nil {
+						result = modules.Fail(rerr.Error())
+					}
 				}
 			}
 
