@@ -86,6 +86,20 @@ type Task struct {
 	Retries *int
 	Delay   float64
 
+	// RunOnce restricts execution to the first currently-active host in
+	// a runSingleTask call, broadcasting any Register result to every
+	// other active host afterward (so a later task on ANY host can
+	// still read it by bare name) — matching real Ansible's own
+	// run_once, including its result-sharing, verified against a real
+	// ansible-playbook run. A real, narrower limitation under strategy:
+	// free: each host there calls runSingleTask with itself as the only
+	// active host (see runFree), so there is no cross-host "first one"
+	// to restrict to — every host still runs its own copy. Real Ansible
+	// coordinates run_once across free's independent per-host lanes;
+	// this port does not, and says so here rather than silently
+	// re-running the task on every host without comment.
+	RunOnce bool
+
 	// RoleDefaults/RoleVars are set only on the synthetic block task
 	// produced for a roles: entry or include_role/import_role — the
 	// engine (Engine.pushRoleVars) merges them on top of the
@@ -318,7 +332,7 @@ var taskReservedKeys = map[string]bool{
 	"failed_when": true, "tags": true, "become": true, "become_user": true,
 	"become_method": true, "notify": true, "vars": true, "delegate_to": true,
 	"block": true, "rescue": true, "always": true, "with_items": true,
-	"until": true, "retries": true, "delay": true,
+	"until": true, "retries": true, "delay": true, "run_once": true,
 }
 
 // includeReservedKeys are the extra keys recognized on an
@@ -382,6 +396,7 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 		DelegateTo:   str(m["delegate_to"]),
 		Until:        normalizeWhen(m["until"]),
 		Delay:        floatDefault(m["delay"], 5),
+		RunOnce:      boolDefault(m["run_once"], false),
 	}
 	if v, ok := m["retries"]; ok {
 		n := toInt(v)
