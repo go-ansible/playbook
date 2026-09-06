@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-ansible/inventory"
+	"github.com/go-ansible/modules"
 	remoteexec "github.com/go-remoteexec/transport"
 )
 
@@ -1274,4 +1275,167 @@ func TestParseVarsPromptRequiresName(t *testing.T) {
 	if err == nil {
 		t.Fatal("want an error for a vars_prompt item missing name")
 	}
+}
+
+// TestEngineAsyncPollZeroFiresAndForgets locks in async:/poll: 0
+// (fire-and-forget), verified against a real ansible-playbook run of
+// an equivalent fixture first: the task returns immediately with
+// started=true, finished=false, and a real ansible_job_id — not
+// waiting for the backgrounded command to actually finish.
+func TestEngineAsyncPollZeroFiresAndForgets(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: async fire and forget
+      command: "sleep 3"
+      async: 30
+      poll: 0
+      register: job
+    - name: report
+      debug:
+        msg: "started={{ job.started }} finished={{ job.finished }}"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	start := time.Now()
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Failed() {
+		t.Fatalf("run failed: %+v", rr.Plays)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("elapsed = %v, want well under the backgrounded sleep 3 — poll:0 should not wait for it", elapsed)
+	}
+	for _, r := range resultsFor(rr, "localhost") {
+		if r.Task == "report" && r.Msg != "started=True finished=False" {
+			t.Fatalf("reportMsg = %q, want %q", r.Msg, "started=True finished=False")
+		}
+	}
+}
+
+// TestEngineAsyncPollWaitsForCompletion locks in async:/poll: N>0
+// (wait, checking every N seconds), verified against a real
+// ansible-playbook run of an equivalent fixture first: the task blocks
+// until the backgrounded command actually finishes, then reports its
+// real rc/stdout.
+func TestEngineAsyncPollWaitsForCompletion(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: async poll wait
+      shell: "sleep 0.3; echo waited-ok"
+      async: 10
+      poll: 1
+      register: job
+    - name: report
+      debug:
+        msg: "finished={{ job.finished }} rc={{ job.rc }} stdout={{ job.stdout }}"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Failed() {
+		t.Fatalf("run failed: %+v", rr.Plays)
+	}
+	for _, r := range resultsFor(rr, "localhost") {
+		if r.Task == "report" && r.Msg != "finished=True rc=0 stdout=waited-ok\n" {
+			t.Fatalf("reportMsg = %q, want %q", r.Msg, "finished=True rc=0 stdout=waited-ok\n")
+		}
+	}
+}
+
+func TestEngineAsyncUnsupportedModuleFailsLoud(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: async on debug (unsupported)
+      debug:
+        msg: hi
+      async: 30
+      poll: 0
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rr.Failed() {
+		t.Fatal("want the run to fail: async: is only supported for command/shell")
+	}
+}
+
+// TestEngineAsyncTimeoutFailsWithoutKillingJob locks in the
+// controller-side half of the timeout contract: a job still running
+// once async: 's limit passes fails the task — the one disclosed
+// difference from real Ansible (see modules.AsyncLaunch's doc comment)
+// is that the job itself is NOT killed on the target, only confirmable
+// by checking it's still genuinely running afterward via the same
+// job id.
+func TestEngineAsyncTimeoutFailsWithoutKillingJob(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: async times out
+      command: "sleep 3"
+      async: 1
+      poll: 1
+      register: job
+      ignore_errors: true
+    - name: report
+      debug:
+        msg: "finished={{ job.finished }} jid={{ job.ansible_job_id }}"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jid string
+	for _, r := range resultsFor(rr, "localhost") {
+		if r.Task == "async times out" && !r.Failed {
+			t.Fatal("want the timed-out task itself to be Failed")
+		}
+		if r.Task == "report" {
+			if !strings.Contains(r.Msg, "finished=False") {
+				t.Fatalf("reportMsg = %q, want finished=False", r.Msg)
+			}
+			if i := strings.Index(r.Msg, "jid="); i >= 0 {
+				jid = r.Msg[i+len("jid="):]
+			}
+		}
+	}
+	if jid == "" {
+		t.Fatal("no job id captured from the report task")
+	}
+	// The job itself was NOT killed — confirm it's still genuinely
+	// running (or has since finished on its own), i.e. still found.
+	conn := remoteexec.NewLocal()
+	found, _, _, _, _, err := modules.AsyncCheck(context.Background(), conn, jid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("job should still be found on the target after a controller-side timeout (not actively killed)")
+	}
+	_ = modules.AsyncCleanup(context.Background(), conn, jid)
 }

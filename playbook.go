@@ -127,6 +127,25 @@ type Task struct {
 	// re-running the task on every host without comment.
 	RunOnce bool
 
+	// Async/Poll implement async:/poll: — see runTaskOnHost's async
+	// branch and modules.AsyncLaunch/AsyncCheck for the real mechanism
+	// and its one disclosed limitation (no active kill on timeout).
+	// Async <= 0 means synchronous, ordinary execution — the
+	// overwhelming majority of tasks. Only command/shell support
+	// Async > 0 at all: every other module's work happens as a
+	// sequence of calls from the control node, not one remote
+	// invocation that could be backgrounded on the target the way
+	// async requires — a task on any other module with Async > 0 fails
+	// loud rather than silently running synchronously and ignoring
+	// what was explicitly asked for. Poll nil means "unset": defaults
+	// to 15 seconds (real Ansible's own DEFAULT_POLL_INTERVAL) when
+	// Async > 0; Poll 0 is fire-and-forget (the task returns immediately
+	// once the job is launched, for a later task to check via
+	// async_status); Poll > 0 waits, checking every Poll seconds, until
+	// the job finishes or Async seconds pass (a timeout failure).
+	Async int
+	Poll  *int
+
 	// RoleDefaults/RoleVars are set only on the synthetic block task
 	// produced for a roles: entry or include_role/import_role — the
 	// engine (Engine.pushRoleVars) merges them on top of the
@@ -405,6 +424,7 @@ var taskReservedKeys = map[string]bool{
 	"become_method": true, "notify": true, "vars": true, "delegate_to": true,
 	"block": true, "rescue": true, "always": true, "with_items": true,
 	"until": true, "retries": true, "delay": true, "run_once": true,
+	"async": true, "poll": true,
 }
 
 // includeReservedKeys are the extra keys recognized on an
@@ -469,10 +489,15 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 		Until:        normalizeWhen(m["until"]),
 		Delay:        floatDefault(m["delay"], 5),
 		RunOnce:      boolDefault(m["run_once"], false),
+		Async:        toInt(m["async"]),
 	}
 	if v, ok := m["retries"]; ok {
 		n := toInt(v)
 		t.Retries = &n
+	}
+	if v, ok := m["poll"]; ok {
+		n := toInt(v)
+		t.Poll = &n
 	}
 	if lc, ok := m["loop_control"].(map[string]any); ok {
 		if lv := str(lc["loop_var"]); lv != "" {
