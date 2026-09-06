@@ -31,10 +31,14 @@ type Connector func(ctx context.Context, hostName string, hostVars map[string]an
 // Three of these settings — remote_user, host_key_checking, timeout —
 // match real Ansible's own config precedence: an inventory/host var
 // wins if set, otherwise an ANSIBLE_* environment variable if set,
-// otherwise the compiled-in default below. This port has no
+// otherwise the compiled-in default below. (forks is a fourth setting
+// on the same env-var-over-default precedence, minus the host-var
+// layer — see Engine.Forks/ConfigDefaults — since it's a global
+// concurrency cap, not a per-host connection detail, so it doesn't
+// belong in this function's own resolution chain.) This port has no
 // ansible.cfg file support at all (a real, stated gap — see
 // go-ansible/cli's ansible-config, which reports exactly this
-// precedence and these three settings, nothing more). Unlike real
+// precedence and these four settings, nothing more). Unlike real
 // Ansible's lenient boolean parsing (yes/no/on/off/1/0/true/false,
 // case-insensitive), ANSIBLE_HOST_KEY_CHECKING here is parsed with
 // Go's strconv.ParseBool (true/false/1/0/t/f, case-sensitive on the
@@ -108,11 +112,10 @@ type ConfigSetting struct {
 	Current string
 }
 
-// ConfigDefaults reports every setting this package's connection
-// logic honors from the environment — go-ansible/cli's ansible-config
-// is a thin printer over this. This is the full list: go-ansible has
-// no ansible.cfg file support and reads no other ANSIBLE_* variables
-// anywhere in the org.
+// ConfigDefaults reports every setting this package honors from the
+// environment — go-ansible/cli's ansible-config is a thin printer over
+// this. This is the full list: go-ansible has no ansible.cfg file
+// support and reads no other ANSIBLE_* variables anywhere in the org.
 func ConfigDefaults() []ConfigSetting {
 	return []ConfigSetting{
 		{
@@ -126,6 +129,10 @@ func ConfigDefaults() []ConfigSetting {
 		{
 			Name: "timeout", EnvVar: "ANSIBLE_TIMEOUT",
 			Default: "10", Current: strconv.Itoa(envInt("ANSIBLE_TIMEOUT", 10)),
+		},
+		{
+			Name: "forks", EnvVar: "ANSIBLE_FORKS",
+			Default: "5", Current: strconv.Itoa(envInt("ANSIBLE_FORKS", 5)),
 		},
 	}
 }

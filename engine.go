@@ -49,6 +49,17 @@ type Engine struct {
 	// live progress reporting. It must not block or panic; callers
 	// wanting ordering should serialize themselves.
 	OnResult func(Result)
+
+	// Forks caps how many hosts run concurrently at once — connecting/
+	// gathering facts, and each task/handler fan-out (runSingleTask,
+	// runFree) all respect it — matching real Ansible's own forks
+	// setting (default 5; New sets this field to 5 for the same
+	// reason). 0 or negative means unlimited concurrency, which was
+	// this port's only behavior before Forks existed; New's default
+	// changes that for anyone constructing an Engine the normal way,
+	// but a caller that explicitly wants the old unbounded behavior can
+	// still set Forks to 0 after New returns.
+	Forks int
 }
 
 // New returns an Engine with the built-in module registry, a fresh
@@ -60,6 +71,7 @@ func New(inv *inventory.Inventory) *Engine {
 		Template:  template.New(),
 		Connect:   DefaultConnect,
 		BaseDir:   ".",
+		Forks:     envInt("ANSIBLE_FORKS", 5), // real Ansible's own default (DEFAULT_FORKS)
 	}
 }
 
@@ -83,6 +95,22 @@ type execCtx struct {
 
 	delegateMu    sync.Mutex
 	delegateConns map[string]remoteexec.Connection
+
+	// sem caps concurrent per-host work at Engine.Forks — nil (Forks <=
+	// 0) means unlimited, matching every fan-out point's own prior
+	// behavior before Forks existed.
+	sem chan struct{}
+}
+
+// acquire blocks until a fork slot is free (a no-op when ec.sem is nil,
+// i.e. Forks <= 0) and returns the matching release func — always
+// call it, typically via defer, even when acquire itself is a no-op.
+func (ec *execCtx) acquire() func() {
+	if ec.sem == nil {
+		return func() {}
+	}
+	ec.sem <- struct{}{}
+	return func() { <-ec.sem }
 }
 
 // delegateConn returns the connection to use for a delegate_to target,
@@ -175,6 +203,9 @@ func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Hos
 		states:        make(map[string]*hostState, len(hosts)),
 		delegateConns: map[string]remoteexec.Connection{},
 	}
+	if e.Forks > 0 {
+		ec.sem = make(chan struct{}, e.Forks)
+	}
 	var order []string
 	for _, h := range hosts {
 		vc := vars.New()
@@ -191,7 +222,7 @@ func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Hos
 		order = append(order, h.Name)
 	}
 
-	e.connectAndGatherFacts(ctx, play, ec.states, pr)
+	ec.connectAndGatherFacts(ctx, play, pr)
 	defer func() {
 		ec.closeDelegates()
 		for _, st := range ec.states {
@@ -237,13 +268,16 @@ func runFree(ctx context.Context, ec *execCtx, play Play, active []string, pr *P
 	wg.Wait()
 }
 
-func (e *Engine) connectAndGatherFacts(ctx context.Context, play Play, states map[string]*hostState, pr *PlayResult) {
+func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *PlayResult) {
+	e := ec.engine
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	for _, st := range states {
+	for _, st := range ec.states {
 		wg.Add(1)
 		go func(st *hostState) {
 			defer wg.Done()
+			release := ec.acquire()
+			defer release()
 			conn, err := e.Connect(ctx, st.name, st.vc.Merged())
 			if err != nil {
 				mu.Lock()
@@ -453,6 +487,8 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 		wg.Add(1)
 		go func(h string) {
 			defer wg.Done()
+			release := ec.acquire()
+			defer release()
 			st := ec.states[h]
 			failed := ec.runTaskOnHost(ctx, task, st, pr)
 			mu.Lock()

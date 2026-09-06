@@ -58,8 +58,8 @@ func TestConfigDefaultsReflectsEnvOverride(t *testing.T) {
 	t.Setenv("ANSIBLE_TIMEOUT", "45")
 
 	settings := ConfigDefaults()
-	if len(settings) != 3 {
-		t.Fatalf("ConfigDefaults() = %d entries, want 3", len(settings))
+	if len(settings) != 4 {
+		t.Fatalf("ConfigDefaults() = %d entries, want 4", len(settings))
 	}
 	byName := map[string]ConfigSetting{}
 	for _, s := range settings {
