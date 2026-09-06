@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/go-ansible/modules"
 	"gopkg.in/yaml.v3"
 )
 
@@ -122,6 +123,7 @@ func parse(data []byte, baseDir string) (Playbook, error) {
 	ctx := parseCtx{baseDir: baseDir}
 	pb := make(Playbook, 0, len(raw))
 	for i, m := range raw {
+		m = normalizeKeys(m)
 		// import_playbook is a top-level entry shape distinct from a
 		// play (no hosts:, just this one key) — splice the referenced
 		// file's own plays in here, resolved statically at parse time
@@ -312,7 +314,42 @@ var includeReservedKeys = map[string]bool{
 	"include_role": true, "import_role": true,
 }
 
+// normalizeKeys returns m with every key carrying a known collection
+// prefix (see modules.NormalizeName — ansible.legacy./ansible.builtin./
+// ansible.posix./community.general.) renamed to its short form, so
+// "ansible.builtin.include_tasks"/"community.general.ufw" are recognized
+// the same way "include_tasks"/"ufw" are. Every one of the nine
+// playbook-engine directives (include_tasks/import_tasks/include_role/
+// import_role/import_playbook/meta/add_host/group_by/include_vars) is
+// matched by an exact map-key or task.Module string elsewhere in this
+// package and in engine.go, entirely outside modules.Registry — so
+// Registry's own FQCN fallback (modules.Get) never sees these, and each
+// site would otherwise need its own repeated FQCN check. Applying this
+// once, wherever a task or play-list entry's raw map is first
+// inspected, covers all of them (and every ordinary module reference)
+// from one place. Returns m itself unchanged when no key needs
+// renaming, to avoid an allocation on the overwhelmingly common case.
+func normalizeKeys(m map[string]any) map[string]any {
+	out := m
+	renamed := false
+	for k, v := range m {
+		if short := modules.NormalizeName(k); short != k {
+			if !renamed {
+				out = make(map[string]any, len(m))
+				for k2, v2 := range m {
+					out[k2] = v2
+				}
+				renamed = true
+			}
+			delete(out, k)
+			out[short] = v
+		}
+	}
+	return out
+}
+
 func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
+	m = normalizeKeys(m)
 	t := Task{
 		Name:         str(m["name"]),
 		When:         normalizeWhen(m["when"]),

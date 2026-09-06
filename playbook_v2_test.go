@@ -269,6 +269,43 @@ func TestParseIncludeTasksSplicesFile(t *testing.T) {
 	}
 }
 
+// TestParseFQCNModuleAndDirective locks in FQCN resolution (both a
+// plain module reference and a playbook-engine directive, which is
+// matched by exact map key/task.Module string entirely outside
+// modules.Registry — see normalizeKeys) — verified against a real
+// ansible-playbook run of this exact fixture: both the FQCN module and
+// the FQCN include_tasks directive work identically to their bare-name
+// form.
+func TestParseFQCNModuleAndDirective(t *testing.T) {
+	dir := t.TempDir()
+	writePlaybookFile(t, dir, "included.yml", `
+- name: inside included file
+  ansible.builtin.debug:
+    msg: "directive ok"
+`)
+	pbPath := writePlaybookFile(t, dir, "site.yml", `
+- hosts: all
+  tasks:
+    - name: fqcn module
+      ansible.builtin.debug:
+        msg: "module ok"
+    - name: fqcn directive
+      ansible.builtin.include_tasks: included.yml
+`)
+	pb, err := ParseFile(pbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moduleTask := pb[0].Tasks[0]
+	if moduleTask.Module != "debug" {
+		t.Fatalf("FQCN module: Task.Module = %q, want %q", moduleTask.Module, "debug")
+	}
+	directiveTask := pb[0].Tasks[1]
+	if !directiveTask.IsBlock() || len(directiveTask.Block) != 1 || directiveTask.Block[0].Name != "inside included file" {
+		t.Fatalf("FQCN include_tasks not spliced: %+v", directiveTask)
+	}
+}
+
 func TestParseImportTasksSplicesFile(t *testing.T) {
 	dir := t.TempDir()
 	writePlaybookFile(t, dir, "included.yml", "- debug: {}\n")
