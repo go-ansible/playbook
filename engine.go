@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-ansible/facts"
 	"github.com/go-ansible/inventory"
@@ -527,51 +528,157 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			iter = scope.Child()
 			iter.SetVar(vars.TaskVars, task.LoopVar, item)
 		}
-		mergedVars := iter.Merged()
 
-		renderedArgs, err := ec.engine.Template.RenderValue(map[string]any(task.Args), mergedVars)
-		args, _ := renderedArgs.(map[string]any)
-		if args == nil {
-			args = map[string]any{}
+		// Real Ansible's own retry-loop variable (task_executor.py):
+		// "retries" there counts the default actual run PLUS configured
+		// retries. Task.Retries nil (unset) means no retry loop at all
+		// UNLESS Until is non-empty, in which case real Ansible defaults
+		// it to 3 — deliberately not folded into parseTask, since that
+		// needs to distinguish "Retries explicitly 0" (still no-op:
+		// totalAttempts stays 1) from "Retries unset".
+		totalAttempts := 1
+		switch {
+		case task.Retries != nil:
+			if *task.Retries > 0 {
+				totalAttempts += *task.Retries
+			}
+		case task.Until != "":
+			totalAttempts += 3
 		}
-		if err != nil {
-			ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: "args: " + err.Error()})
-			anyFailed = true
-			continue
-		}
-		if task.Module == "template" {
-			args["_vars"] = mergedVars
+		delay := task.Delay
+		if delay < 0 {
+			delay = 1
 		}
 
-		result, handled, derr := ec.runDirective(ctx, task, st, args, pr)
-		if derr != nil {
-			ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: derr.Error()})
-			anyFailed = true
-			continue
-		}
-		if !handled {
-			conn, cerr := ec.connectionFor(ctx, task, mergedVars, st)
-			if cerr != nil {
-				ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: cerr.Error()})
+		var result modules.Result
+		var mergedVars map[string]any
+		var attemptView map[string]any
+		aborted := false
+
+		for attempt := 1; attempt <= totalAttempts; attempt++ {
+			mergedVars = iter.Merged()
+
+			renderedArgs, err := ec.engine.Template.RenderValue(map[string]any(task.Args), mergedVars)
+			args, _ := renderedArgs.(map[string]any)
+			if args == nil {
+				args = map[string]any{}
+			}
+			if err != nil {
+				ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: "args: " + err.Error()})
 				anyFailed = true
+				aborted = true
+				break
+			}
+			if task.Module == "template" {
+				args["_vars"] = mergedVars
+			}
+
+			var handled bool
+			var derr error
+			result, handled, derr = ec.runDirective(ctx, task, st, args, pr)
+			if derr != nil {
+				ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: derr.Error()})
+				anyFailed = true
+				aborted = true
+				break
+			}
+			if !handled {
+				conn, cerr := ec.connectionFor(ctx, task, mergedVars, st)
+				if cerr != nil {
+					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: cerr.Error()})
+					anyFailed = true
+					aborted = true
+					break
+				}
+				var rerr error
+				result, rerr = ec.engine.Modules.Run(ctx, task.Module, conn, args)
+				if rerr != nil {
+					result = modules.Fail(rerr.Error())
+				}
+			}
+
+			resultView := resultToMap(result)
+			if task.ChangedWhen != "" {
+				if ok, cerr := ec.engine.Template.EvalBool(task.ChangedWhen, withResult(mergedVars, resultView)); cerr == nil {
+					result.Changed = ok
+				}
+			}
+			if task.FailedWhen != "" {
+				if ok, ferr := ec.engine.Template.EvalBool(task.FailedWhen, withResult(mergedVars, resultView)); ferr == nil {
+					result.Failed = ok
+				}
+			}
+
+			// Fresh snapshot, taken after changed_when/failed_when so
+			// it reflects their effect — this is what gets registered
+			// mid-retry (so until: can reference it) and what the
+			// final report/register below uses.
+			attemptView = resultToMap(result)
+			if totalAttempts == 1 {
+				break // the overwhelmingly common case: no retry loop at all
+			}
+			attemptView["attempts"] = attempt
+
+			// Registered on iter (this item's own scope, a snapshot
+			// copy per vars.Context.Child's own doc comment — not a
+			// live view of st.vc), not st.vc: mergedVars is re-merged
+			// from iter right below, and st.vc's own copy won't be
+			// visible there until the task-level register after this
+			// whole retry loop sets it for real, for subsequent tasks
+			// to see.
+			if task.Register != "" {
+				iter.SetVar(vars.Registered, task.Register, attemptView)
+				mergedVars = iter.Merged()
+			}
+
+			cond := task.Until
+			passed := !result.Failed
+			if cond != "" {
+				if ok, uerr := ec.engine.Template.EvalBool(cond, withResult(mergedVars, attemptView)); uerr == nil {
+					passed = ok
+				} else {
+					passed = false
+				}
+			}
+			if passed {
+				break
+			}
+			if attempt < totalAttempts {
+				attemptView["retries"] = totalAttempts
+				attemptView["attempts"] = attempt + 1
+				if task.Register != "" {
+					iter.SetVar(vars.Registered, task.Register, attemptView)
+				}
+				select {
+				case <-ctx.Done():
+					aborted = true
+				case <-time.After(time.Duration(delay * float64(time.Second))):
+				}
+				if aborted {
+					break
+				}
 				continue
 			}
-			result, err = ec.engine.Modules.Run(ctx, task.Module, conn, args)
-			if err != nil {
-				result = modules.Fail(err.Error())
-			}
+			// Every attempt is exhausted without until (or, absent
+			// until, plain success) ever passing — real Ansible fails
+			// the task here regardless of the LAST attempt's own
+			// Failed value, since the entire point of until is that
+			// exhausting retries without it passing is itself a
+			// failure. attempts is deliberately set to totalAttempts-1,
+			// not totalAttempts: a genuine, verified quirk in
+			// ansible-core's own retry loop (task_executor.py's
+			// for-else branch), not a typo here — confirmed both
+			// empirically (retries: 3 → 4 real module executions, but
+			// the registered result's own .attempts field reads 3) and
+			// in ansible-core's source itself. Reproduced rather than
+			// "fixed", since a real playbook may already read
+			// .attempts expecting this exact value.
+			attemptView["attempts"] = totalAttempts - 1
+			result.Failed = true
 		}
 
-		resultView := resultToMap(result)
-		if task.ChangedWhen != "" {
-			if ok, cerr := ec.engine.Template.EvalBool(task.ChangedWhen, withResult(mergedVars, resultView)); cerr == nil {
-				result.Changed = ok
-			}
-		}
-		if task.FailedWhen != "" {
-			if ok, ferr := ec.engine.Template.EvalBool(task.FailedWhen, withResult(mergedVars, resultView)); ferr == nil {
-				result.Failed = ok
-			}
+		if aborted {
+			continue
 		}
 
 		if result.Changed {
@@ -581,7 +688,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			anyFailed = true
 		}
 		lastResult = result
-		lastExtra = resultToMap(result)
+		lastExtra = attemptView
 
 		ec.report(pr, Result{
 			Host: st.name, Task: task.Name, Module: task.Module,
