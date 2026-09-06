@@ -1,8 +1,11 @@
 package playbook
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -60,6 +63,21 @@ type Engine struct {
 	// but a caller that explicitly wants the old unbounded behavior can
 	// still set Forks to 0 after New returns.
 	Forks int
+
+	// Prompt implements vars_prompt's actual interactive prompting:
+	// given the fully-formatted message (already combining the prompt
+	// text and "[default]" the way real Ansible's own do_var_prompt
+	// does) and whether the input should be hidden, it returns what the
+	// user entered. New's default (defaultPrompt) is a plain
+	// bufio-over-os.Stdin read with no terminal awareness at all — it
+	// works the same whether stdin is a real terminal or a pipe (never
+	// hides input, and never detects a non-interactive session the way
+	// real Ansible does to skip prompting and warn instead), which
+	// matches a raw library caller or a piped/test invocation but not
+	// real Ansible's actual interactive behavior. go-ansible/cli's
+	// ansible-playbook overrides this with a real, terminal-aware
+	// implementation (golang.org/x/term) for actual interactive use.
+	Prompt func(msg string, private bool) (string, error)
 }
 
 // New returns an Engine with the built-in module registry, a fresh
@@ -72,7 +90,19 @@ func New(inv *inventory.Inventory) *Engine {
 		Connect:   DefaultConnect,
 		BaseDir:   ".",
 		Forks:     envInt("ANSIBLE_FORKS", 5), // real Ansible's own default (DEFAULT_FORKS)
+		Prompt:    defaultPrompt,
 	}
+}
+
+// defaultPrompt is Engine.Prompt's default — see that field's doc
+// comment for what it deliberately doesn't do (no terminal awareness).
+func defaultPrompt(msg string, private bool) (string, error) {
+	fmt.Fprint(os.Stderr, msg)
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	return strings.TrimRight(line, "\r\n"), nil
 }
 
 type hostState struct {
@@ -151,6 +181,9 @@ func (ec *execCtx) closeDelegates() {
 func (e *Engine) RunPlaybook(ctx context.Context, pb Playbook) (*RunResult, error) {
 	rr := &RunResult{}
 	for _, play := range pb {
+		if err := e.applyVarsPrompt(&play); err != nil {
+			return rr, fmt.Errorf("play %q: vars_prompt: %w", play.Name, err)
+		}
 		pr, err := e.runPlay(ctx, play)
 		if pr != nil {
 			rr.Plays = append(rr.Plays, *pr)
@@ -160,6 +193,63 @@ func (e *Engine) RunPlaybook(ctx context.Context, pb Playbook) (*RunResult, erro
 		}
 	}
 	return rr, nil
+}
+
+// applyVarsPrompt resolves play.VarsPrompt into play.Vars, once per
+// play (not per host) — matching real Ansible's own
+// playbook_executor.py exactly: a name already present in
+// Engine.ExtraVars is left alone entirely (no prompt at all — a real
+// var supplied via -e/--extra-vars always outranks a play var anyway,
+// but real Ansible also skips the interactive prompt itself in that
+// case, and this matches it for the same UX reason, not because the
+// final value would otherwise differ). confirm loops asking twice
+// until they match, exactly like ansible-core's own do_var_prompt — no
+// escape from the loop besides matching (nor does real Ansible have
+// one). An empty result falls back to Default when one is set,
+// matching real Ansible's own "if not result and default is not None"
+// check.
+func (e *Engine) applyVarsPrompt(play *Play) error {
+	for _, vp := range play.VarsPrompt {
+		if _, extra := e.ExtraVars[vp.Name]; extra {
+			continue
+		}
+		promptText := vp.Prompt
+		if promptText == "" {
+			promptText = vp.Name
+		}
+		msg := promptText + ": "
+		if vp.Default != "" {
+			msg = fmt.Sprintf("%s [%s]: ", promptText, vp.Default)
+		}
+
+		var result string
+		for {
+			var err error
+			result, err = e.Prompt(msg, vp.Private)
+			if err != nil {
+				return err
+			}
+			if !vp.Confirm {
+				break
+			}
+			second, err := e.Prompt("confirm "+msg, vp.Private)
+			if err != nil {
+				return err
+			}
+			if result == second {
+				break
+			}
+		}
+		if result == "" && vp.Default != "" {
+			result = vp.Default
+		}
+
+		if play.Vars == nil {
+			play.Vars = map[string]any{}
+		}
+		play.Vars[vp.Name] = result
+	}
+	return nil
 }
 
 func (e *Engine) runPlay(ctx context.Context, play Play) (*PlayResult, error) {

@@ -1120,3 +1120,158 @@ func TestEngineDefaultForksIsFive(t *testing.T) {
 		t.Fatalf("New's default Forks = %d, want 5", e.Forks)
 	}
 }
+
+// queuePrompt returns an Engine.Prompt double that answers from a
+// fixed queue in order, recording every (msg, private) it was asked —
+// for asserting the exact prompts a vars_prompt run produces.
+func queuePrompt(answers []string) (fn func(msg string, private bool) (string, error), asked *[]string) {
+	i := 0
+	var log []string
+	return func(msg string, private bool) (string, error) {
+		log = append(log, msg)
+		if i >= len(answers) {
+			return "", nil
+		}
+		a := answers[i]
+		i++
+		return a, nil
+	}, &log
+}
+
+// TestVarsPromptBasicAndDefault locks in vars_prompt's core behavior —
+// prompted values land in play vars, an empty answer with a default
+// falls back to it — verified against a real ansible-playbook run of
+// an equivalent fixture (piped/non-interactive there falls back to
+// default the same way, just via a different path: no TTY at all
+// rather than an empty typed answer).
+func TestVarsPromptBasicAndDefault(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  vars_prompt:
+    - name: username
+      prompt: "Enter username"
+      default: "anon"
+    - name: password
+      prompt: "Enter password"
+      private: true
+  tasks:
+    - name: report
+      debug:
+        msg: "user={{ username }} pass={{ password }}"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	prompt, asked := queuePrompt([]string{"", "secret123"})
+	e.Prompt = prompt
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Failed() {
+		t.Fatalf("run failed: %+v", rr.Plays)
+	}
+	for _, r := range resultsFor(rr, "localhost") {
+		if r.Task == "report" && r.Msg != "user=anon pass=secret123" {
+			t.Fatalf("reportMsg = %q, want %q", r.Msg, "user=anon pass=secret123")
+		}
+	}
+	wantAsked := []string{"Enter username [anon]: ", "Enter password: "}
+	if len(*asked) != len(wantAsked) || (*asked)[0] != wantAsked[0] || (*asked)[1] != wantAsked[1] {
+		t.Fatalf("asked = %v, want %v", *asked, wantAsked)
+	}
+}
+
+// TestVarsPromptSkippedWhenExtraVarSet locks in real Ansible's own
+// skip-if-already-an-extra-var behavior (verified against a real
+// ansible-playbook run: no prompt happens at all when -e already
+// supplies the name, confirmed there by the absence of even the
+// "Not prompting" warning that a piped, non-preseeded run shows).
+func TestVarsPromptSkippedWhenExtraVarSet(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  vars_prompt:
+    - name: username
+      default: "anon"
+  tasks:
+    - name: report
+      debug:
+        msg: "user={{ username }}"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	e.ExtraVars = map[string]any{"username": "preseeded"}
+	prompt, asked := queuePrompt(nil)
+	e.Prompt = prompt
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Failed() {
+		t.Fatalf("run failed: %+v", rr.Plays)
+	}
+	if len(*asked) != 0 {
+		t.Fatalf("asked = %v, want no prompt at all when the var is already an extra-var", *asked)
+	}
+	for _, r := range resultsFor(rr, "localhost") {
+		if r.Task == "report" && r.Msg != "user=preseeded" {
+			t.Fatalf("reportMsg = %q, want %q (extra-vars must still win over the play var)", r.Msg, "user=preseeded")
+		}
+	}
+}
+
+// TestVarsPromptConfirmRetriesUntilMatch locks in confirm:, matching
+// ansible-core's own do_var_prompt: asks twice, retries (both prompts
+// again) until the two answers match.
+func TestVarsPromptConfirmRetriesUntilMatch(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  vars_prompt:
+    - name: password
+      confirm: true
+  tasks:
+    - name: report
+      debug:
+        msg: "pass={{ password }}"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	// First pair mismatches (retry), second pair matches.
+	prompt, asked := queuePrompt([]string{"first", "second", "match", "match"})
+	e.Prompt = prompt
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Failed() {
+		t.Fatalf("run failed: %+v", rr.Plays)
+	}
+	for _, r := range resultsFor(rr, "localhost") {
+		if r.Task == "report" && r.Msg != "pass=match" {
+			t.Fatalf("reportMsg = %q, want %q", r.Msg, "pass=match")
+		}
+	}
+	if len(*asked) != 4 {
+		t.Fatalf("asked %d times, want 4 (one mismatched pair, then a matching pair)", len(*asked))
+	}
+}
+
+func TestParseVarsPromptRequiresName(t *testing.T) {
+	_, err := Parse([]byte(`
+- hosts: all
+  vars_prompt:
+    - prompt: "no name given"
+  tasks: []
+`))
+	if err == nil {
+		t.Fatal("want an error for a vars_prompt item missing name")
+	}
+}
