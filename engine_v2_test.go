@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-ansible/inventory"
 	remoteexec "github.com/go-remoteexec/transport"
@@ -1070,5 +1071,52 @@ func TestEngineRunOnceExecutesOnceAndBroadcastsRegister(t *testing.T) {
 		if reportMsg != want {
 			t.Errorf("host %s: reportMsg = %v, want %q", h, reportMsg, want)
 		}
+	}
+}
+
+// TestEngineForksLimitsConcurrency locks in Engine.Forks actually
+// throttling concurrency, using real wall-clock timing (like
+// TestEngineFreeStrategyRunsHostsIndependently) rather than a fake
+// connection: 4 hosts each sleep 200ms; with Forks: 2 that can only
+// overlap two at a time, so the whole batch takes at least two
+// sequential rounds (~400ms) — comfortably more than the ~200ms it
+// would take with unlimited concurrency, without asserting a flaky
+// tight bound.
+func TestEngineForksLimitsConcurrency(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: sleep
+      command: "sleep 0.2"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(multiHostInventory(t, 4))
+	e.Forks = 2
+	start := time.Now()
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Failed() {
+		t.Fatalf("run failed: %+v", rr.Plays)
+	}
+	if elapsed < 350*time.Millisecond {
+		t.Fatalf("elapsed = %v, want >= ~400ms (2 sequential rounds of 4 hosts at Forks:2) — Forks doesn't appear to be throttling concurrency", elapsed)
+	}
+}
+
+// TestEngineDefaultForksIsFive locks in New's default matching real
+// Ansible's own DEFAULT_FORKS/ANSIBLE_FORKS default of 5, rather than
+// this port's prior unlimited-concurrency behavior — a caller that
+// wants the old behavior back can still set Forks to 0 after New
+// returns.
+func TestEngineDefaultForksIsFive(t *testing.T) {
+	e := New(localhostInventory())
+	if e.Forks != 5 {
+		t.Fatalf("New's default Forks = %d, want 5", e.Forks)
 	}
 }
