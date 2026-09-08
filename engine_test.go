@@ -533,3 +533,69 @@ all:
 		t.Fatal("want a connect failure recorded")
 	}
 }
+
+// TestEngineOmitDropsModuleArgument exercises template's omit sentinel
+// (v0.5.0) end to end through a real task run, not just template's own
+// unit tests. debug's own args["var"] check (debug.go) is presence-
+// sensitive — ok is true the moment the key exists at all, regardless of
+// its value — which is exactly what distinguishes "the key was truly
+// omitted" from "the key is present but empty/nil": if RenderValue merely
+// rendered var to an empty string instead of dropping the key, this test
+// would still see debug take the var-branch and fail.
+func TestEngineOmitDropsModuleArgument(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: var omitted when undefined
+      debug:
+        msg: "fallback msg"
+        var: "{{ myvar | default(omit) }}"
+      register: omitted_result
+
+- hosts: all
+  gather_facts: false
+  vars:
+    myvar: "set value"
+  tasks:
+    - name: var kept when defined
+      debug:
+        msg: "fallback msg"
+        var: "{{ myvar | default(omit) }}"
+      register: kept_result
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	results := map[string]Result{}
+	e.OnResult = func(r Result) {
+		results[r.Task] = r
+	}
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Failed() {
+		t.Fatalf("run failed: %+v", rr.Plays)
+	}
+
+	omitted, ok := results["var omitted when undefined"]
+	if !ok {
+		t.Fatal("no result recorded for the omitted-var task")
+	}
+	if omitted.Msg != "fallback msg" {
+		t.Errorf(`omitted task Msg = %q, want "fallback msg" (var should have been dropped entirely, falling through to msg)`, omitted.Msg)
+	}
+	if _, ok := omitted.Extra["var"]; ok {
+		t.Errorf("omitted task Extra[var] = %#v, want the key entirely absent", omitted.Extra["var"])
+	}
+
+	kept, ok := results["var kept when defined"]
+	if !ok {
+		t.Fatal("no result recorded for the kept-var task")
+	}
+	if kept.Msg != "set value" {
+		t.Errorf(`kept task Msg = %q, want "set value" (var was defined, must not be omitted)`, kept.Msg)
+	}
+}
