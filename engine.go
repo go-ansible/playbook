@@ -50,8 +50,17 @@ type Engine struct {
 	// OnResult, if set, is called synchronously as each task result is
 	// produced (from whichever goroutine ran that host's task) — for
 	// live progress reporting. It must not block or panic; callers
-	// wanting ordering should serialize themselves.
+	// wanting ordering should serialize themselves. It is the one-hook
+	// shorthand for a caller that only wants results; a caller wanting
+	// play and recap events too installs a Callback instead.
 	OnResult func(Result)
+
+	// Callbacks are reporting plugins observing the run as it happens —
+	// this port's equivalent of real Ansible's own callback plugins, and
+	// a list for the same reason real Ansible loads one stdout callback
+	// alongside any number of notification ones. See Callback for the
+	// concurrency contract every hook is held to.
+	Callbacks []Callback
 
 	// Forks caps how many hosts run concurrently at once — connecting/
 	// gathering facts, and each task/handler fan-out (runSingleTask,
@@ -180,6 +189,13 @@ func (ec *execCtx) closeDelegates() {
 // RunPlaybook runs every play in pb in order.
 func (e *Engine) RunPlaybook(ctx context.Context, pb Playbook) (*RunResult, error) {
 	rr := &RunResult{}
+	// The stats hook fires even when a play errors out, so a recap still
+	// covers whatever did run — real Ansible prints one there too.
+	defer func() {
+		for _, cb := range e.Callbacks {
+			cb.OnStats(rr)
+		}
+	}()
 	for _, play := range pb {
 		if err := e.applyVarsPrompt(&play); err != nil {
 			return rr, fmt.Errorf("play %q: vars_prompt: %w", play.Name, err)
@@ -254,6 +270,10 @@ func (e *Engine) applyVarsPrompt(play *Play) error {
 
 func (e *Engine) runPlay(ctx context.Context, play Play) (*PlayResult, error) {
 	pr := newPlayResult(play.Name)
+
+	for _, cb := range e.Callbacks {
+		cb.OnPlayStart(play)
+	}
 
 	hosts, err := e.Inventory.Match(play.Hosts)
 	if err != nil {
@@ -372,7 +392,7 @@ func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *Pla
 			if err != nil {
 				mu.Lock()
 				st.failed = true
-				pr.record(Result{Host: st.name, Task: "(connect)", Failed: true, Msg: err.Error()})
+				ec.report(pr, Result{Host: st.name, Task: "(connect)", Failed: true, Msg: err.Error()})
 				mu.Unlock()
 				return
 			}
@@ -384,13 +404,13 @@ func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *Pla
 			if err != nil {
 				mu.Lock()
 				st.failed = true
-				pr.record(Result{Host: st.name, Task: "(gather_facts)", Failed: true, Msg: err.Error()})
+				ec.report(pr, Result{Host: st.name, Task: "(gather_facts)", Failed: true, Msg: err.Error()})
 				mu.Unlock()
 				return
 			}
 			st.vc.Set(vars.Facts, vars.InjectFacts(gathered))
 			mu.Lock()
-			pr.record(Result{Host: st.name, Task: "(gather_facts)", Msg: "ok"})
+			ec.report(pr, Result{Host: st.name, Task: "(gather_facts)", Msg: "ok"})
 			mu.Unlock()
 		}(st)
 	}
@@ -708,7 +728,7 @@ func (ec *execCtx) runAsyncTask(ctx context.Context, task Task, conn remoteexec.
 				WithExtra("stderr", stderr)
 		}
 		if time.Now().After(deadline) {
-			return modules.Fail("async: timeout exceeded, job " + jid + " is still running").
+			return modules.Fail("async: timeout exceeded, job "+jid+" is still running").
 				WithExtra("ansible_job_id", jid).
 				WithExtra("started", true).
 				WithExtra("finished", false)
@@ -1127,10 +1147,17 @@ func splitCommaList(s string) []string {
 	return out
 }
 
+// report is the single chokepoint every task result goes through: it
+// records the result on the play and raises it to the caller's own
+// reporting hooks. Nothing should call pr.record directly — a result
+// that skips this is a result no callback ever sees.
 func (ec *execCtx) report(pr *PlayResult, r Result) {
 	pr.record(r)
 	if ec.engine.OnResult != nil {
 		ec.engine.OnResult(r)
+	}
+	for _, cb := range ec.engine.Callbacks {
+		cb.OnTaskResult(r)
 	}
 }
 
