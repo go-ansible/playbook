@@ -599,3 +599,33 @@ func TestEngineOmitDropsModuleArgument(t *testing.T) {
 		t.Errorf(`kept task Msg = %q, want "set value" (var was defined, must not be omitted)`, kept.Msg)
 	}
 }
+
+// TestEngineLookupInTask is the witness for template's lookup plugins
+// actually reaching a real playbook, rather than only existing in the
+// templating library.
+func TestEngineLookupInTask(t *testing.T) {
+	t.Setenv("GO_ANSIBLE_PLAYBOOK_LOOKUP", "from the environment")
+
+	pb, err := Parse([]byte(`
+- name: look something up
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: read the environment
+      debug:
+        msg: "{{ lookup('env', 'GO_ANSIBLE_PLAYBOOK_LOOKUP') }}"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var msg string
+	e := New(localhostInventory())
+	e.OnResult = func(r Result) { msg = r.Msg }
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	if msg != "from the environment" {
+		t.Errorf("lookup through a task = %q, want %q", msg, "from the environment")
+	}
+}
