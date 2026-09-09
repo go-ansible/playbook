@@ -774,11 +774,20 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 	var lastResult modules.Result
 	var lastExtra map[string]any
 
-	for _, item := range items {
+	// loopResults collects one entry per iteration for a looped task's
+	// registered value — real Ansible's own `results` list. Nil for a
+	// task that isn't looping, which registers its module fields flat.
+	var loopResults []any
+
+	for index, item := range items {
 		iter := scope
 		if looping {
 			iter = scope.Child()
 			iter.SetVar(vars.TaskVars, task.LoopVar, item)
+			if task.IndexVar != "" {
+				// loop_control.index_var, 0-based as in real Ansible.
+				iter.SetVar(vars.TaskVars, task.IndexVar, index)
+			}
 		}
 
 		// Real Ansible's own retry-loop variable (task_executor.py):
@@ -946,6 +955,19 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		lastResult = result
 		lastExtra = attemptView
 
+		if looping {
+			// One entry per iteration, shaped as real Ansible shapes it:
+			// the module's own fields plus the item and the name of the
+			// loop variable it was bound to.
+			entry := map[string]any{}
+			for k, v := range attemptView {
+				entry[k] = v
+			}
+			entry["item"] = item
+			entry["ansible_loop_var"] = task.LoopVar
+			loopResults = append(loopResults, entry)
+		}
+
 		ec.report(pr, Result{
 			Host: st.name, Task: task.Name, Module: task.Module,
 			Changed: result.Changed, Failed: result.Failed, Msg: result.Msg, Extra: result.Extra,
@@ -970,7 +992,23 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		}
 	}
 
-	if task.Register != "" {
+	if task.Register != "" && looping {
+		// A looped task registers ONLY the aggregate plus the
+		// per-iteration list — measured against real ansible-core 2.21.4,
+		// whose registered value for one has exactly the keys
+		// changed/failed/msg/results and none of the module's own fields.
+		// `{{ r.results | map(attribute='stdout') }}` is everyday usage
+		// and `results` did not exist here at all.
+		if loopResults == nil {
+			loopResults = []any{}
+		}
+		st.vc.SetVar(vars.Registered, task.Register, map[string]any{
+			"changed": anyChanged,
+			"failed":  anyFailed,
+			"msg":     "All items completed",
+			"results": loopResults,
+		})
+	} else if task.Register != "" {
 		regValue := lastExtra
 		if regValue == nil {
 			regValue = map[string]any{}

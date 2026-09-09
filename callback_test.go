@@ -346,3 +346,105 @@ func TestAssertEvaluatesJinjaConditions(t *testing.T) {
 		t.Error("assert over a single non-list condition failed")
 	}
 }
+
+// TestLoopRegisterShape pins the registered value a LOOPED task produces
+// against what real ansible-core 2.21.4 produces: exactly the keys
+// changed/failed/msg/results, with none of the module's own fields at the
+// top level, and one entry per iteration carrying the module fields plus
+// item and ansible_loop_var. `results` did not exist here at all.
+func TestLoopRegisterShape(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - command: echo "{{ item }}"
+      loop: [a, b]
+      register: r
+    - name: aggregate
+      debug:
+        msg: "{{ r.results | map(attribute='stdout') | join(',') }}|{{ r.msg }}|{{ r.changed }}|{{ r.results | length }}"
+    - name: entry
+      debug:
+        msg: "{{ r.results[1].item }}/{{ r.results[1].ansible_loop_var }}/{{ r.results[0].rc }}"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs := map[string]string{}
+	e := New(localhostInventory())
+	e.OnResult = func(res Result) { msgs[res.Task] = res.Msg }
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+
+	// Real Ansible: stdout of each iteration, the fixed aggregate msg,
+	// the aggregate changed, and one results entry per item.
+	if got, want := msgs["aggregate"], "a,b|All items completed|True|2"; got != want {
+		t.Errorf("aggregate = %q, want %q", got, want)
+	}
+	// Each entry carries the module's own fields plus the item and the
+	// name of the loop variable it was bound to.
+	if got, want := msgs["entry"], "b/item/0"; got != want {
+		t.Errorf("entry = %q, want %q", got, want)
+	}
+}
+
+// TestLoopIndexVar covers loop_control.index_var, which was parsed
+// nowhere and rendered as the empty string.
+func TestLoopIndexVar(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - debug:
+        msg: "{{ idx }}:{{ thing }}"
+      loop: [alpha, beta, gamma]
+      loop_control:
+        loop_var: thing
+        index_var: idx
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen []string
+	e := New(localhostInventory())
+	e.OnResult = func(res Result) { seen = append(seen, res.Msg) }
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"0:alpha", "1:beta", "2:gamma"}
+	if len(seen) != len(want) {
+		t.Fatalf("results = %#v, want %#v", seen, want)
+	}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Errorf("result[%d] = %q, want %q (index_var is 0-based)", i, seen[i], want[i])
+		}
+	}
+}
+
+// TestNonLoopedRegisterStaysFlat guards that giving looped tasks a
+// results list did not change the shape of an ordinary one.
+func TestNonLoopedRegisterStaysFlat(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - command: echo solo
+      register: solo
+    - debug:
+        msg: "{{ solo.stdout }}|{{ solo.results is defined }}"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var last string
+	e := New(localhostInventory())
+	e.OnResult = func(res Result) { last = res.Msg }
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	if last != "solo|False" {
+		t.Errorf("non-looped register = %q, want %q", last, "solo|False")
+	}
+}
