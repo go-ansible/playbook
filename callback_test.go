@@ -275,3 +275,74 @@ func TestCallbackStatsRaisedOnError(t *testing.T) {
 		t.Errorf("OnStats calls after an error = %d, want 1", cb.stats)
 	}
 }
+
+// TestAssertEvaluatesJinjaConditions covers the form every real playbook
+// uses and this engine used to reject: `that` holding expression source
+// rather than pre-computed booleans. The modules package documented that
+// the engine would evaluate these, and nothing did.
+func TestAssertEvaluatesJinjaConditions(t *testing.T) {
+	run := func(t *testing.T, body string) *RunResult {
+		t.Helper()
+		pb, err := Parse([]byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := New(localhostInventory())
+		rr, err := e.RunPlaybook(context.Background(), pb)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rr
+	}
+
+	passing := run(t, `
+- hosts: all
+  gather_facts: false
+  vars:
+    n: 5
+    word: hello
+  tasks:
+    - assert:
+        that:
+          - n | int == 5
+          - word == "hello"
+          - n > 1
+`)
+	if passing.Failed() {
+		t.Errorf("assert over true conditions failed: %+v", passing.Plays)
+	}
+
+	failing := run(t, `
+- hosts: all
+  gather_facts: false
+  vars:
+    n: 5
+  tasks:
+    - assert:
+        that:
+          - n | int == 6
+        fail_msg: n was not six
+`)
+	if !failing.Failed() {
+		t.Fatal("assert over a false condition did not fail")
+	}
+	var msg string
+	for _, p := range failing.Plays {
+		for _, r := range p.Results {
+			if r.Failed {
+				msg = r.Msg
+			}
+		}
+	}
+	if msg != "n was not six" {
+		t.Errorf("fail_msg = %q, want %q", msg, "n was not six")
+	}
+
+	// A bare boolean still works, and a single condition need not be a list.
+	if rr := run(t, "- hosts: all\n  gather_facts: false\n  tasks:\n    - assert: {that: true}\n"); rr.Failed() {
+		t.Error("assert over a literal true failed")
+	}
+	if rr := run(t, "- hosts: all\n  gather_facts: false\n  vars: {n: 2}\n  tasks:\n    - assert: {that: \"n | int == 2\"}\n"); rr.Failed() {
+		t.Error("assert over a single non-list condition failed")
+	}
+}
