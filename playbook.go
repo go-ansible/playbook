@@ -87,6 +87,7 @@ type Task struct {
 	When         string // Jinja2 expression, already normalized from a string or []string
 	Loop         any    // a literal list, or a "{{ expr }}" string rendered at run time
 	LoopVar      string // default "item"
+	IndexVar     string // loop_control.index_var — unset means no index variable
 	Register     string
 	IgnoreErrors bool
 	ChangedWhen  string
@@ -502,6 +503,9 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 	if lc, ok := m["loop_control"].(map[string]any); ok {
 		if lv := str(lc["loop_var"]); lv != "" {
 			t.LoopVar = lv
+		}
+		if iv := str(lc["index_var"]); iv != "" {
+			t.IndexVar = iv
 		}
 	}
 	if v, ok := m["become"]; ok {
