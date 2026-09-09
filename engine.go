@@ -1051,9 +1051,72 @@ func (ec *execCtx) runDirective(ctx context.Context, task Task, st *hostState, a
 	case "include_vars":
 		r, e := ec.runIncludeVars(args, st)
 		return r, true, e
+	case "assert":
+		r, e := ec.runAssert(args, st)
+		return r, true, e
 	default:
 		return modules.Result{}, false, nil
 	}
+}
+
+// runAssert evaluates assert's `that` conditions here rather than in the
+// module, because they are Jinja2 expressions over the host's own
+// variables and only the engine holds those — which is exactly why real
+// Ansible's assert is an action plugin rather than a module.
+//
+// The modules package already documented this contract ("the playbook
+// engine evaluates each Jinja2 expression in `that` before invoking the
+// module") and nothing ever honoured it, so every real
+// `assert: that: ["x == 5"]` failed here with "did not evaluate to a
+// boolean" while running fine on real ansible-core. A condition is
+// evaluated the same way `when:` is, since real Ansible evaluates both
+// through the same templar.
+func (ec *execCtx) runAssert(args map[string]any, st *hostState) (modules.Result, error) {
+	raw, ok := args["that"]
+	if !ok {
+		return modules.Fail("assert: missing required argument: that"), nil
+	}
+	conditions, ok := raw.([]any)
+	if !ok {
+		conditions = []any{raw}
+	}
+
+	vars := st.vc.Merged()
+	for _, cond := range conditions {
+		truthy, err := ec.evalCondition(cond, vars)
+		if err != nil {
+			return modules.Fail(fmt.Sprintf("assert: %v", err)), nil
+		}
+		if truthy {
+			continue
+		}
+		msg := stringArg(args, "fail_msg", stringArg(args, "msg", fmt.Sprintf("Assertion failed: %v", cond)))
+		return modules.Fail(msg), nil
+	}
+	return modules.Ok(stringArg(args, "success_msg", "All assertions passed")), nil
+}
+
+// evalCondition takes one assert condition. A bare bool is already
+// decided — a caller can write `that: true`, and a whole-expression
+// string like "{{ x }}" may already have been rendered to one by the
+// time args reach here. Anything else is treated as expression source,
+// exactly as `when:` treats it.
+func (ec *execCtx) evalCondition(cond any, vars map[string]any) (bool, error) {
+	switch c := cond.(type) {
+	case bool:
+		return c, nil
+	case string:
+		return ec.engine.Template.EvalBool(c, vars)
+	default:
+		return false, fmt.Errorf("condition %v is neither a boolean nor an expression (got %T)", cond, cond)
+	}
+}
+
+func stringArg(args map[string]any, key, fallback string) string {
+	if v, ok := args[key].(string); ok && v != "" {
+		return v
+	}
+	return fallback
 }
 
 // runMeta implements Ansible's meta: task. Only flush_handlers (run
