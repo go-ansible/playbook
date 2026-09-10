@@ -1,0 +1,1 @@
+- shell: echo "inc.task v_prec={{ v_prec }}" >> {{ log }}

@@ -1,0 +1,1 @@
+- shell: echo "r2.task (dependency of r1)" >> {{ log }}
