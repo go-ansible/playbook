@@ -484,9 +484,13 @@ func TestEngineMetaClearFacts(t *testing.T) {
 	if rr.Failed() {
 		t.Fatalf("run failed: %+v", rr.Plays)
 	}
+	// Measured against real ansible-core 2.21.4: meta: clear_facts drops
+	// GATHERED facts, and a set_fact survives it. This test used to
+	// assert the opposite, which only held here because set_fact wrote
+	// into the same layer as gathered facts.
 	for _, r := range resultsFor(rr, "localhost") {
-		if r.Task == "check" && r.Msg != "gone" {
-			t.Fatalf("msg = %v, want the fact cleared by meta: clear_facts", r.Msg)
+		if r.Task == "check" && r.Msg != "value1" {
+			t.Fatalf("msg = %v, want the set_fact to survive meta: clear_facts", r.Msg)
 		}
 	}
 }
@@ -612,7 +616,12 @@ func TestEngineIncludeVarsSetsBareNameVars(t *testing.T) {
 	}
 }
 
-func TestEngineRoleDefaultsVisibleInsideRoleAndRestoredAfter(t *testing.T) {
+// TestEngineRoleDefaultsPersistAfterARolesEntry: a roles: entry is
+// static, and real ansible-core 2.21.4 keeps its defaults and vars
+// resolvable for the rest of the play — measured. Only include_role,
+// which is dynamic, scopes them to the role (see the include/import
+// pair below).
+func TestEngineRoleDefaultsPersistAfterARolesEntry(t *testing.T) {
 	dir := t.TempDir()
 	writePlaybookFile(t, dir, "roles/r1/tasks/main.yml", `
 - name: inside role
@@ -654,8 +663,8 @@ func TestEngineRoleDefaultsVisibleInsideRoleAndRestoredAfter(t *testing.T) {
 	if insideMsg != "role_default" {
 		t.Fatalf("inside role: msg = %v", insideMsg)
 	}
-	if afterMsg != "unset-outside-role" {
-		t.Fatalf("after role: msg = %v, want the role default restored/gone once the role's block ends", afterMsg)
+	if afterMsg != "role_default" {
+		t.Fatalf("after role: msg = %v, want the role default still resolvable after a roles: entry", afterMsg)
 	}
 }
 

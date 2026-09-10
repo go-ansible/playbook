@@ -462,7 +462,9 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 
 	if task.RoleDefaults != nil || task.RoleVars != nil {
 		restore := ec.pushRoleVars(active, task.RoleDefaults, task.RoleVars)
-		defer restore()
+		if task.RoleVarsScoped {
+			defer restore()
+		}
 	}
 
 	originalActive := append([]string{}, active...)
@@ -509,19 +511,27 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 	return finalActive
 }
 
-// pushRoleVars sets RoleDefaults/RoleVars on every active host for the
-// duration of a role's block, returning a function that restores each
-// host's prior layer content. A role included from inside another
-// role's own tasks (roles: nesting an include_role/import_role, or one
-// include_role nesting another) merges its own defaults/vars on top of
-// whatever the enclosing role already pushed, rather than replacing it
-// outright — this matches real Ansible, which keeps every currently
-// "active" role's defaults/vars in scope at once (confirmed against a
-// real ansible-playbook run: a variable the inner role does not define
-// in its own defaults/main.yml or vars/main.yml still resolves to the
-// outer role's value while the inner role's tasks run). restore()
-// unwinds back to exactly the merged content the enclosing role had in
-// place before this push, so nesting composes correctly to any depth.
+// pushRoleVars merges a role's defaults/vars onto the RoleDefaults and
+// RoleVars layers of every active host, and returns the function that
+// unwinds them again. The CALLER decides whether to run it, because
+// whether a role's variables outlive the role is a property of how the
+// role was invoked, measured against real ansible-core 2.21.4 by running
+// each form in isolation:
+//
+//   - include_role is dynamic, and its variables leave scope with it —
+//     after it, the role's own vars read as undefined. Scoped.
+//   - import_role and a roles: entry are static, and real Ansible
+//     injects their variables for the whole play — after either, the
+//     role's vars still resolve. Not scoped.
+//
+// This port unwound all three, so every role variable read as undefined
+// the moment the role finished, including for roles: — the common case.
+//
+// Merging rather than replacing keeps nesting correct either way: a role
+// included from inside another role's tasks stacks its own defaults/vars
+// on top of the enclosing role's, so a variable the inner role does not
+// define still resolves to the outer role's value, and unwinding returns
+// to exactly what the enclosing role had.
 func (ec *execCtx) pushRoleVars(active []string, defaults, roleVars map[string]any) func() {
 	type saved struct{ defaults, vars map[string]any }
 	prior := make(map[string]saved, len(active))
@@ -983,12 +993,20 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		// break any template written the normal way. Both cases merge
 		// per-key into the existing Facts layer rather than replacing
 		// it, so neither erases facts the other already set.
+		// Where a module's facts land is a PRECEDENCE decision, not a
+		// storage one. Real Ansible puts gathered facts near the bottom
+		// of the ladder but set_fact near the top, above play vars — so
+		// a play var and a set_fact of the same name resolve to the
+		// set_fact. Sending both to the Facts layer made the play var
+		// win, measured against real ansible-core 2.21.4.
 		factVars := result.Facts
+		layer := vars.Registered
 		if task.Module == "setup" || task.Module == "gather_facts" {
 			factVars = vars.InjectFacts(result.Facts)
+			layer = vars.Facts
 		}
 		for k, v := range factVars {
-			st.vc.SetVar(vars.Facts, k, v)
+			st.vc.SetVar(layer, k, v)
 		}
 	}
 
@@ -1231,8 +1249,10 @@ func (ec *execCtx) runIncludeVars(args map[string]any, st *hostState) (modules.R
 	if err != nil {
 		return modules.Result{}, fmt.Errorf("include_vars: %w", err)
 	}
+	// include_vars sits above play vars and role vars in real Ansible's
+	// ladder, not down with gathered facts.
 	for k, v := range loaded {
-		st.vc.SetVar(vars.Facts, k, v)
+		st.vc.SetVar(vars.Registered, k, v)
 	}
 	return modules.Ok("included " + path), nil
 }
