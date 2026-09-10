@@ -8,6 +8,7 @@ require (
 	github.com/go-ansible/modules v0.37.0
 	github.com/go-ansible/template v0.11.0
 	github.com/go-ansible/vars v0.1.2
+	github.com/go-ansible/vault v0.2.0
 	github.com/go-remoteexec/transport v0.1.7
 	gopkg.in/yaml.v3 v3.0.1
 )
