@@ -87,6 +87,13 @@ type Engine struct {
 	// ansible-playbook overrides this with a real, terminal-aware
 	// implementation (golang.org/x/term) for actual interactive use.
 	Prompt func(msg string, private bool) (string, error)
+
+	// VaultPassword decrypts a vault-encrypted file loaded at RUN time —
+	// today that means include_vars. Files pulled in while parsing (the
+	// playbook, vars_files, a role's own files) take their password from
+	// ParseFileWithVault instead, since parsing happens before an Engine
+	// exists.
+	VaultPassword string
 }
 
 // New returns an Engine with the built-in module registry, a fresh
@@ -1246,7 +1253,7 @@ func (ec *execCtx) runIncludeVars(args map[string]any, st *hostState) (modules.R
 	if path == "" {
 		return modules.Result{}, fmt.Errorf("include_vars: missing required argument: file")
 	}
-	loaded, err := loadYAMLMap(filepath.Join(ec.engine.BaseDir, path), false)
+	loaded, err := loadYAMLMap(filepath.Join(ec.engine.BaseDir, path), false, ec.engine.VaultPassword)
 	if err != nil {
 		return modules.Result{}, fmt.Errorf("include_vars: %w", err)
 	}

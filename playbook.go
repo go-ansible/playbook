@@ -6,7 +6,9 @@
 package playbook
 
 import (
+	"errors"
 	"fmt"
+	"github.com/go-ansible/vault"
 	"os"
 	"path/filepath"
 	"strings"
@@ -196,7 +198,7 @@ func (t Task) IsBlock() bool { return t.Block != nil }
 // to the current working directory — use ParseFile when the playbook
 // lives elsewhere and its includes should resolve relative to it.
 func Parse(data []byte) (Playbook, error) {
-	return parse(data, ".")
+	return parse(data, ".", "")
 }
 
 // ParseFile reads and parses the playbook at path, resolving every
@@ -204,19 +206,27 @@ func Parse(data []byte) (Playbook, error) {
 // ansible-playbook, which resolves roles/ and included files relative
 // to the playbook file, not the current working directory).
 func ParseFile(path string) (Playbook, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("playbook: %w", err)
-	}
-	return parse(data, filepath.Dir(path))
+	return ParseFileWithVault(path, "")
 }
 
-func parse(data []byte, baseDir string) (Playbook, error) {
+// ParseFileWithVault is ParseFile with a vault password, so the playbook
+// or any file it pulls in — a vars_files target, a role's own
+// defaults/vars/tasks — may be vault-encrypted. An empty password
+// behaves exactly like ParseFile.
+func ParseFileWithVault(path, vaultPassword string) (Playbook, error) {
+	data, err := readMaybeEncrypted(path, vaultPassword)
+	if err != nil {
+		return nil, err
+	}
+	return parse(data, filepath.Dir(path), vaultPassword)
+}
+
+func parse(data []byte, baseDir, vaultPassword string) (Playbook, error) {
 	var raw []map[string]any
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("playbook: %w", err)
 	}
-	ctx := parseCtx{baseDir: baseDir}
+	ctx := parseCtx{baseDir: baseDir, vaultPassword: vaultPassword}
 	pb := make(Playbook, 0, len(raw))
 	for i, m := range raw {
 		m = normalizeKeys(m)
@@ -260,6 +270,12 @@ type parseCtx struct {
 	baseDir      string
 	roleHandlers *[]Task
 
+	// vaultPassword decrypts any file this parse reads that turns out to
+	// be vault-encrypted — the playbook itself, a vars_files target, a
+	// role's defaults/vars/tasks. Empty means no password was supplied,
+	// and an encrypted file is then a clear error.
+	vaultPassword string
+
 	// roleStack is the chain of roles currently being resolved, used to
 	// break a dependency cycle rather than recurse until the stack dies.
 	roleStack []string
@@ -297,7 +313,7 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 
 	p.VarsFiles = toStringList(m["vars_files"])
 	for _, path := range p.VarsFiles {
-		fileVars, err := loadYAMLMap(filepath.Join(ctx.baseDir, path), false)
+		fileVars, err := loadYAMLMap(filepath.Join(ctx.baseDir, path), false, ctx.vaultPassword)
 		if err != nil {
 			return p, fmt.Errorf("vars_files: %w", err)
 		}
@@ -780,20 +796,20 @@ func loadRole(ctx parseCtx, name string) (roleFile, error) {
 	}
 	var r roleFile
 	var err error
-	roleCtx := parseCtx{baseDir: ctx.baseDir, roleHandlers: ctx.roleHandlers}
+	roleCtx := parseCtx{baseDir: ctx.baseDir, roleHandlers: ctx.roleHandlers, vaultPassword: ctx.vaultPassword}
 	if r.Tasks, err = loadYAMLTaskFile(roleCtx, filepath.Join(dir, "tasks", "main.yml"), true); err != nil {
 		return r, fmt.Errorf("role %q: tasks: %w", name, err)
 	}
 	if r.Handlers, err = loadYAMLTaskFile(roleCtx, filepath.Join(dir, "handlers", "main.yml"), true); err != nil {
 		return r, fmt.Errorf("role %q: handlers: %w", name, err)
 	}
-	if r.Defaults, err = loadYAMLMap(filepath.Join(dir, "defaults", "main.yml"), true); err != nil {
+	if r.Defaults, err = loadYAMLMap(filepath.Join(dir, "defaults", "main.yml"), true, ctx.vaultPassword); err != nil {
 		return r, fmt.Errorf("role %q: defaults: %w", name, err)
 	}
-	if r.Vars, err = loadYAMLMap(filepath.Join(dir, "vars", "main.yml"), true); err != nil {
+	if r.Vars, err = loadYAMLMap(filepath.Join(dir, "vars", "main.yml"), true, ctx.vaultPassword); err != nil {
 		return r, fmt.Errorf("role %q: vars: %w", name, err)
 	}
-	if r.Deps, err = loadRoleDependencies(filepath.Join(dir, "meta", "main.yml")); err != nil {
+	if r.Deps, err = loadRoleDependencies(filepath.Join(dir, "meta", "main.yml"), ctx.vaultPassword); err != nil {
 		return r, fmt.Errorf("role %q: meta: %w", name, err)
 	}
 	r.Dir = dir
@@ -805,8 +821,8 @@ func loadRole(ctx parseCtx, name string) (roleFile, error) {
 // loadRoleDependencies reads a role's meta/main.yml dependencies: list.
 // An entry is either a bare role name or a mapping carrying name:/role:
 // plus vars:, the same two shapes include_role accepts.
-func loadRoleDependencies(path string) ([]RoleRef, error) {
-	m, err := loadYAMLMap(path, true)
+func loadRoleDependencies(path, vaultPassword string) ([]RoleRef, error) {
+	m, err := loadYAMLMap(path, true, vaultPassword)
 	if err != nil {
 		return nil, err
 	}
@@ -855,9 +871,9 @@ func stampRoleDir(tasks []Task, dir string) {
 // include_tasks/import_tasks target (real Ansible errors on a missing
 // include, and so does this port).
 func loadYAMLTaskFile(ctx parseCtx, path string, optional bool) ([]Task, error) {
-	data, err := os.ReadFile(path)
+	data, err := readMaybeEncrypted(path, ctx.vaultPassword)
 	if err != nil {
-		if optional && os.IsNotExist(err) {
+		if optional && os.IsNotExist(errors.Unwrap(err)) {
 			return nil, nil
 		}
 		return nil, err
@@ -882,10 +898,10 @@ func loadYAMLTaskFile(ctx parseCtx, path string, optional bool) ([]Task, error) 
 // defaults/main.yml or vars/main.yml (every role file is optional),
 // false for a vars_files/include_vars target (real Ansible errors on a
 // missing one, and so does this port).
-func loadYAMLMap(path string, optional bool) (map[string]any, error) {
-	data, err := os.ReadFile(path)
+func loadYAMLMap(path string, optional bool, vaultPassword string) (map[string]any, error) {
+	data, err := readMaybeEncrypted(path, vaultPassword)
 	if err != nil {
-		if optional && os.IsNotExist(err) {
+		if optional && os.IsNotExist(errors.Unwrap(err)) {
 			return map[string]any{}, nil
 		}
 		return nil, err
@@ -1028,4 +1044,20 @@ func toStringList(v any) []string {
 	default:
 		return nil
 	}
+}
+
+// readMaybeEncrypted reads a file and decrypts it when it turns out to be
+// vault-encrypted. Every YAML file this package loads goes through here,
+// because real Ansible accepts an encrypted one anywhere it accepts a
+// plaintext one and the call site cannot know which it has.
+func readMaybeEncrypted(path, vaultPassword string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("playbook: %w", err)
+	}
+	plain, err := vault.MaybeDecrypt(data, vaultPassword)
+	if err != nil {
+		return nil, fmt.Errorf("playbook: %s: %w", path, err)
+	}
+	return plain, nil
 }
