@@ -161,6 +161,17 @@ type Task struct {
 	RoleDefaults map[string]any
 	RoleVars     map[string]any
 
+	// RoleVarsScoped limits RoleDefaults/RoleVars to this role's own
+	// block, unwinding them when it ends. True only for include_role,
+	// which is dynamic: real Ansible resolves it at run time and its
+	// variables leave scope with it. A roles: entry and import_role are
+	// both static — real Ansible injects their variables for the whole
+	// play, so they persist. Measured against real ansible-core 2.21.4
+	// by running include_role and import_role in isolation: after the
+	// former the role's vars read as undefined, after the latter they
+	// still resolve.
+	RoleVarsScoped bool
+
 	Block  []Task
 	Rescue []Task
 	Always []Task
@@ -626,6 +637,7 @@ func includeRoleTask(ctx parseCtx, t Task, key string, v any) (Task, error) {
 	if err != nil {
 		return t, fmt.Errorf("task %q: %s: %w", t.Name, key, err)
 	}
+	roleT.RoleVarsScoped = key == "include_role"
 	roleT.Name = t.Name
 	if roleT.Name == "" {
 		roleT.Name = "role: " + ref.Name

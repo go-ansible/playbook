@@ -448,3 +448,83 @@ func TestNonLoopedRegisterStaysFlat(t *testing.T) {
 		t.Errorf("non-looped register = %q, want %q", last, "solo|False")
 	}
 }
+
+// TestIncludeRoleScopesVarsImportRoleDoesNot pins the difference measured
+// against real ansible-core 2.21.4 by running each form in isolation:
+// include_role is dynamic and its variables leave scope with it, while
+// import_role is static and real Ansible injects its variables for the
+// whole play. This port unwound both.
+func TestIncludeRoleScopesVarsImportRoleDoesNot(t *testing.T) {
+	dir := t.TempDir()
+	writePlaybookFile(t, dir, "roles/r3/vars/main.yml", "r3_var: v3\n")
+	writePlaybookFile(t, dir, "roles/r3/tasks/main.yml", "- name: inside\n  debug: {msg: \"{{ r3_var }}\"}\n")
+
+	run := func(t *testing.T, directive string) string {
+		t.Helper()
+		pbPath := writePlaybookFile(t, dir, directive+".yml", `
+- hosts: all
+  gather_facts: false
+  tasks:
+    - `+directive+`: {name: r3}
+    - name: after
+      debug:
+        msg: "{{ r3_var | default('GONE') }}"
+`)
+		pb, err := ParseFile(pbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var after string
+		e := New(localhostInventory())
+		e.OnResult = func(r Result) {
+			if r.Task == "after" {
+				after = r.Msg
+			}
+		}
+		if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+			t.Fatal(err)
+		}
+		return after
+	}
+
+	if got := run(t, "include_role"); got != "GONE" {
+		t.Errorf("after include_role: %q, want GONE (dynamic, vars leave scope)", got)
+	}
+	if got := run(t, "import_role"); got != "v3" {
+		t.Errorf("after import_role: %q, want v3 (static, vars persist)", got)
+	}
+}
+
+// TestSetFactBeatsPlayVars covers the precedence rung set_fact actually
+// sits on. Its output used to land in the Facts layer, below play vars,
+// so a play var of the same name won — the opposite of real Ansible.
+func TestSetFactBeatsPlayVars(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  vars:
+    v: from_play_vars
+  tasks:
+    - name: before
+      debug: {msg: "{{ v }}"}
+    - set_fact:
+        v: from_set_fact
+    - name: after
+      debug: {msg: "{{ v }}"}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs := map[string]string{}
+	e := New(localhostInventory())
+	e.OnResult = func(r Result) { msgs[r.Task] = r.Msg }
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	if msgs["before"] != "from_play_vars" {
+		t.Errorf("before set_fact = %q, want the play var", msgs["before"])
+	}
+	if msgs["after"] != "from_set_fact" {
+		t.Errorf("after set_fact = %q, want the set_fact to win over the play var", msgs["after"])
+	}
+}
