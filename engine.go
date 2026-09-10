@@ -861,6 +861,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 					aborted = true
 					break
 				}
+				resolveRoleSrc(task, args)
 				if task.Async > 0 {
 					result = ec.runAsyncTask(ctx, task, conn, args)
 				} else {
@@ -1350,4 +1351,46 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// roleSrcDirs names, per module, the role subdirectory real Ansible
+// searches for a relative src:. These are the file-carrying modules
+// whose src is a path on the CONTROLLER; a module whose src names
+// something on the target (or a URL) must not appear here.
+var roleSrcDirs = map[string]string{
+	"copy":      "files",
+	"script":    "files",
+	"unarchive": "files",
+	"template":  "templates",
+}
+
+// resolveRoleSrc rewrites a relative src: to the role's own copy of the
+// file, which is what makes `copy: {src: hello.txt}` inside a role find
+// roles/<name>/files/hello.txt. Real Ansible searches the role's
+// files/ (templates/ for template) first; this port searched only the
+// process working directory, so the task failed outright with "no such
+// file or directory" for every role that ships a file.
+//
+// Only a task that came from a role is touched, only a relative src, and
+// only when the role actually has that file — anything else is left
+// exactly as written, so a playbook-level task keeps resolving the way
+// it always did.
+func resolveRoleSrc(task Task, args map[string]any) {
+	sub, ok := roleSrcDirs[modules.NormalizeName(task.Module)]
+	if !ok || task.RoleDir == "" || args == nil {
+		return
+	}
+	src, ok := args["src"].(string)
+	if !ok || src == "" || filepath.IsAbs(src) {
+		return
+	}
+	for _, candidate := range []string{
+		filepath.Join(task.RoleDir, sub, src),
+		filepath.Join(task.RoleDir, src),
+	} {
+		if _, err := os.Stat(candidate); err == nil {
+			args["src"] = candidate
+			return
+		}
+	}
 }
