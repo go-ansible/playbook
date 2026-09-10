@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/go-ansible/modules"
 	"gopkg.in/yaml.v3"
@@ -172,6 +173,14 @@ type Task struct {
 	// still resolve.
 	RoleVarsScoped bool
 
+	// RoleDir is the directory of the role this task came from, empty
+	// for a task written directly in a playbook. A relative src: on a
+	// file-carrying module resolves against it — real Ansible looks in
+	// the role's own files/ (or templates/ for template) before
+	// anything else, which is what makes "src: hello.txt" work inside a
+	// role at all.
+	RoleDir string
+
 	Block  []Task
 	Rescue []Task
 	Always []Task
@@ -250,6 +259,10 @@ func parse(data []byte, baseDir string) (Playbook, error) {
 type parseCtx struct {
 	baseDir      string
 	roleHandlers *[]Task
+
+	// roleStack is the chain of roles currently being resolved, used to
+	// break a dependency cycle rather than recurse until the stack dies.
+	roleStack []string
 }
 
 var playReservedKeys = map[string]bool{
@@ -703,6 +716,13 @@ func parseRoleRef(v any) (RoleRef, error) {
 // ctx.roleHandlers, which parsePlay folds into Play.Handlers, since a
 // role's handlers are notifiable by any task in the play.
 func roleTask(ctx parseCtx, ref RoleRef) (Task, error) {
+	for _, seen := range ctx.roleStack {
+		if seen == ref.Name {
+			return Task{}, fmt.Errorf("role %q: dependency cycle: %s", ref.Name,
+				strings.Join(append(append([]string{}, ctx.roleStack...), ref.Name), " -> "))
+		}
+	}
+
 	role, err := loadRole(ctx, ref.Name)
 	if err != nil {
 		return Task{}, err
@@ -710,11 +730,30 @@ func roleTask(ctx parseCtx, ref RoleRef) (Task, error) {
 	if len(role.Handlers) > 0 && ctx.roleHandlers != nil {
 		*ctx.roleHandlers = append(*ctx.roleHandlers, role.Handlers...)
 	}
+
+	// A role's meta/main.yml dependencies run BEFORE its own tasks, and
+	// each carries its own defaults/vars — real Ansible resolves them
+	// depth-first and this port ran them not at all. They are prepended
+	// as their own synthetic role blocks so each keeps its own variable
+	// layers rather than being flattened into this role's.
+	block := make([]Task, 0, len(role.Deps)+len(role.Tasks))
+	depCtx := ctx
+	depCtx.roleStack = append(append([]string{}, ctx.roleStack...), ref.Name)
+	for _, dep := range role.Deps {
+		depTask, err := roleTask(depCtx, dep)
+		if err != nil {
+			return Task{}, fmt.Errorf("role %q: %w", ref.Name, err)
+		}
+		block = append(block, depTask)
+	}
+	block = append(block, role.Tasks...)
+
 	t := Task{
 		Name:         "role: " + ref.Name,
-		Block:        role.Tasks,
+		Block:        block,
 		RoleDefaults: role.Defaults,
 		RoleVars:     mergedRoleVars(role.Vars, ref.Vars),
+		RoleDir:      role.Dir,
 	}
 	if t.Block == nil {
 		t.Block = []Task{}
@@ -730,6 +769,8 @@ type roleFile struct {
 	Handlers []Task
 	Defaults map[string]any
 	Vars     map[string]any
+	Deps     []RoleRef
+	Dir      string
 }
 
 func loadRole(ctx parseCtx, name string) (roleFile, error) {
@@ -752,7 +793,59 @@ func loadRole(ctx parseCtx, name string) (roleFile, error) {
 	if r.Vars, err = loadYAMLMap(filepath.Join(dir, "vars", "main.yml"), true); err != nil {
 		return r, fmt.Errorf("role %q: vars: %w", name, err)
 	}
+	if r.Deps, err = loadRoleDependencies(filepath.Join(dir, "meta", "main.yml")); err != nil {
+		return r, fmt.Errorf("role %q: meta: %w", name, err)
+	}
+	r.Dir = dir
+	stampRoleDir(r.Tasks, dir)
+	stampRoleDir(r.Handlers, dir)
 	return r, nil
+}
+
+// loadRoleDependencies reads a role's meta/main.yml dependencies: list.
+// An entry is either a bare role name or a mapping carrying name:/role:
+// plus vars:, the same two shapes include_role accepts.
+func loadRoleDependencies(path string) ([]RoleRef, error) {
+	m, err := loadYAMLMap(path, true)
+	if err != nil {
+		return nil, err
+	}
+	raw, ok := m["dependencies"].([]any)
+	if !ok {
+		return nil, nil
+	}
+	var out []RoleRef
+	for _, entry := range raw {
+		switch d := entry.(type) {
+		case string:
+			out = append(out, RoleRef{Name: d})
+		case map[string]any:
+			ref := RoleRef{Name: str(firstNonNil(d["name"], d["role"]))}
+			if vv, ok := d["vars"].(map[string]any); ok {
+				ref.Vars = vv
+			}
+			if ref.Name == "" {
+				return nil, fmt.Errorf("dependency %v: missing role name", entry)
+			}
+			out = append(out, ref)
+		default:
+			return nil, fmt.Errorf("dependency %v: unsupported shape %T", entry, entry)
+		}
+	}
+	return out, nil
+}
+
+// stampRoleDir records the owning role's directory on every task in the
+// tree, so a nested block's tasks resolve their src: the same way.
+func stampRoleDir(tasks []Task, dir string) {
+	for i := range tasks {
+		if tasks[i].RoleDir == "" {
+			tasks[i].RoleDir = dir
+		}
+		stampRoleDir(tasks[i].Block, dir)
+		stampRoleDir(tasks[i].Rescue, dir)
+		stampRoleDir(tasks[i].Always, dir)
+	}
 }
 
 // loadYAMLTaskFile reads and parses a task-list YAML file. optional

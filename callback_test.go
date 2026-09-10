@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -527,4 +529,101 @@ func TestSetFactBeatsPlayVars(t *testing.T) {
 	if msgs["after"] != "from_set_fact" {
 		t.Errorf("after set_fact = %q, want the set_fact to win over the play var", msgs["after"])
 	}
+}
+
+// TestRoleMetaDependenciesRunFirst covers role dependencies, which this
+// port read nowhere: a role's meta/main.yml dependencies: run before its
+// own tasks, each with its own defaults/vars.
+func TestRoleMetaDependenciesRunFirst(t *testing.T) {
+	dir := t.TempDir()
+	writePlaybookFile(t, dir, "roles/dep/vars/main.yml", "dep_var: from_dep\n")
+	writePlaybookFile(t, dir, "roles/dep/tasks/main.yml", "- name: dep task\n  debug: {msg: \"{{ dep_var }}\"}\n")
+	writePlaybookFile(t, dir, "roles/main/meta/main.yml", "dependencies:\n  - dep\n")
+	writePlaybookFile(t, dir, "roles/main/tasks/main.yml", "- name: main task\n  debug: {msg: ran}\n")
+	pbPath := writePlaybookFile(t, dir, "site.yml", "- hosts: all\n  gather_facts: false\n  roles: [main]\n")
+
+	pb, err := ParseFile(pbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	e := New(localhostInventory())
+	e.OnResult = func(r Result) { order = append(order, r.Task+"="+r.Msg) }
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"dep task=from_dep", "main task=ran"}
+	if len(order) != len(want) || order[0] != want[0] || order[1] != want[1] {
+		t.Errorf("order = %#v, want %#v (dependency first, with its own vars)", order, want)
+	}
+}
+
+// TestRoleDependencyCycleIsAnError guards that a cycle is reported
+// rather than recursed into until the stack dies.
+func TestRoleDependencyCycleIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	writePlaybookFile(t, dir, "roles/a/meta/main.yml", "dependencies: [b]\n")
+	writePlaybookFile(t, dir, "roles/a/tasks/main.yml", "- debug: {msg: a}\n")
+	writePlaybookFile(t, dir, "roles/b/meta/main.yml", "dependencies: [a]\n")
+	writePlaybookFile(t, dir, "roles/b/tasks/main.yml", "- debug: {msg: b}\n")
+	pbPath := writePlaybookFile(t, dir, "site.yml", "- hosts: all\n  gather_facts: false\n  roles: [a]\n")
+
+	_, err := ParseFile(pbPath)
+	if err == nil {
+		t.Fatal("a dependency cycle parsed without error")
+	}
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("error = %v, want it to name the cycle", err)
+	}
+}
+
+// TestRoleSrcResolvesAgainstRoleDirs covers the search path that makes
+// `src: hello.txt` work inside a role at all. Without it every role
+// shipping a file failed with "no such file or directory".
+func TestRoleSrcResolvesAgainstRoleDirs(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writePlaybookFile(t, dir, "roles/r/files/hello.txt", "from-role-files\n")
+	writePlaybookFile(t, dir, "roles/r/templates/t.j2", "rendered:{{ who }}\n")
+	writePlaybookFile(t, dir, "roles/r/vars/main.yml", "who: ada\n")
+	writePlaybookFile(t, dir, "roles/r/tasks/main.yml", `
+- name: copy from role files
+  copy: {src: hello.txt, dest: `+out+`/copied.txt}
+- name: template from role templates
+  template: {src: t.j2, dest: `+out+`/rendered.txt}
+`)
+	pbPath := writePlaybookFile(t, dir, "site.yml", "- hosts: all\n  gather_facts: false\n  roles: [r]\n")
+
+	pb, err := ParseFile(pbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr, err := e2eRun(t, pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Failed() {
+		t.Fatalf("run failed: %+v", rr.Plays)
+	}
+	for name, want := range map[string]string{
+		"copied.txt":   "from-role-files\n",
+		"rendered.txt": "rendered:ada\n",
+	} {
+		got, err := os.ReadFile(filepath.Join(out, name))
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func e2eRun(t *testing.T, pb Playbook) (*RunResult, error) {
+	t.Helper()
+	return New(localhostInventory()).RunPlaybook(context.Background(), pb)
 }
