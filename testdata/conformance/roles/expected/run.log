@@ -1,0 +1,15 @@
+r2.task (dependency of r1)
+r1.task
+r1.prec=role_vars
+r1.default=default_only
+r1.notify
+task.prec=role_vars
+layers group=from_group_vars host=from_host_vars play=from_play_vars file=from_vars_files rolevar=from_role_vars default=from_role_defaults
+taskvar.prec=task_vars
+inc.task v_prec=role_vars
+inc.task v_prec=role_vars
+r2.task (dependency of r1)
+r2.task (dependency of r1)
+after_set_fact.prec=set_fact
+extra.prec=from_extra_vars
+handler.r1

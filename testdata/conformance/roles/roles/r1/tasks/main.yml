@@ -1,0 +1,13 @@
+- shell: echo "r1.task" >> {{ log }}
+- shell: echo "r1.prec={{ v_prec }}" >> {{ log }}
+- shell: echo "r1.default={{ v_only_default }}" >> {{ log }}
+- name: role file lookup
+  copy:
+    src: hello.txt
+    dest: "{{ out_dir }}/from_role_files.txt"
+- name: role template lookup
+  template:
+    src: t.j2
+    dest: "{{ out_dir }}/from_role_templates.txt"
+- shell: echo "r1.notify" >> {{ log }}
+  notify: r1 handler

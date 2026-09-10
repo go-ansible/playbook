@@ -1,0 +1,43 @@
+- name: roles, includes and precedence
+  hosts: all
+  gather_facts: false
+  vars:
+    v_play: from_play_vars
+    v_prec: play_vars
+  vars_files:
+    - playvars.yml
+  roles:
+    - r1
+  tasks:
+    - name: precedence outside the role
+      shell: echo "task.prec={{ v_prec }}" >> {{ log }}
+
+    - name: each layer is still reachable by its own name
+      shell: echo "layers group={{ v_group }} host={{ v_host }} play={{ v_play }} file={{ v_file }} rolevar={{ v_rolevars }} default={{ v_default }}" >> {{ log }}
+
+    - name: task vars beat everything below extra-vars
+      shell: echo "taskvar.prec={{ v_prec }}" >> {{ log }}
+      vars:
+        v_prec: task_vars
+
+    - name: include_tasks
+      include_tasks: inc_tasks.yml
+
+    - name: import_tasks
+      import_tasks: inc_tasks.yml
+
+    - name: include_role
+      include_role:
+        name: r2
+
+    - name: import_role
+      import_role:
+        name: r2
+
+    - name: set_fact beats role vars
+      set_fact:
+        v_prec: set_fact
+    - shell: echo "after_set_fact.prec={{ v_prec }}" >> {{ log }}
+
+    - name: extra vars win over everything
+      shell: echo "extra.prec={{ v_extra | default('UNSET') }}" >> {{ log }}
