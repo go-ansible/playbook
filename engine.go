@@ -399,7 +399,7 @@ func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *Pla
 			if err != nil {
 				mu.Lock()
 				st.failed = true
-				ec.report(pr, Result{Host: st.name, Task: "(connect)", Failed: true, Msg: err.Error()})
+				ec.report(pr, Result{Host: st.name, Task: "(connect)", Failed: true, Unreachable: true, Msg: err.Error()})
 				mu.Unlock()
 				return
 			}
@@ -486,6 +486,9 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 		}
 		afterRescue := ec.runTaskList(ctx, task.Rescue, newlyFailed, pr)
 		rescueFailed := diff(newlyFailed, afterRescue)
+		for _, h := range afterRescue {
+			pr.recordRescued(h)
+		}
 		for _, h := range rescueFailed {
 			ec.states[h].failed = true
 		}
@@ -988,7 +991,9 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 
 		ec.report(pr, Result{
 			Host: st.name, Task: task.Name, Module: task.Module,
-			Changed: result.Changed, Failed: result.Failed, Msg: result.Msg, Extra: result.Extra,
+			Changed: result.Changed, Failed: result.Failed,
+			Ignored: result.Failed && task.IgnoreErrors,
+			Msg:     result.Msg, Extra: result.Extra,
 		})
 
 		// set_fact's/include_vars' variables are accessible by their
