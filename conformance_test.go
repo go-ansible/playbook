@@ -193,3 +193,82 @@ func TestConformanceRecapRealFailureStillFails(t *testing.T) {
 		t.Errorf("failed = %d, want 1", got)
 	}
 }
+
+// TestConformanceDebugAndBanners pins four display behaviours measured
+// against real ansible-core 2.21.4, each of which this port got wrong:
+// a debug task printed nothing at all, `debug: {var: X}` reported the
+// NAME of the variable rather than its value, an unnamed play bannered
+// as bare "PLAY", and an unnamed task got no banner at all.
+func TestConformanceDebugAndBanners(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  vars:
+    d: {a: 1}
+  tasks:
+    - name: debug msg
+      debug: {msg: hello}
+    - name: debug var
+      debug: {var: d}
+    - debug: {msg: unnamed}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	e := New(localhostInventory())
+	e.Callbacks = []Callback{NewDefaultCallback(&buf, false)}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+
+	got := buf.String()
+	for _, want := range []string{
+		// An unnamed play is named after its hosts pattern.
+		"\nPLAY [all]\n",
+		// A debug task dumps its result, pretty-printed at four spaces.
+		"\nTASK [debug msg]\nok: [localhost] => {\n    \"msg\": \"hello\"\n}\n",
+		// var: reports the variable's VALUE, keyed by its own name, and
+		// sets no msg.
+		"\nTASK [debug var]\nok: [localhost] => {\n    \"d\": {\n        \"a\": 1\n    }\n}\n",
+		// An unnamed task banners under its module.
+		"\nTASK [debug]\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q\n--- got ---\n%s", want, got)
+		}
+	}
+}
+
+// TestConformanceIgnoringLine covers the line real Ansible prints after a
+// failure ignore_errors swallowed, so a red line that did not stop the
+// run is not mistaken for one that did.
+func TestConformanceIgnoringLine(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: ignored
+      command: /bin/false
+      ignore_errors: true
+    - name: plain
+      command: echo ok
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	e := New(localhostInventory())
+	e.Callbacks = []Callback{NewDefaultCallback(&buf, false)}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "...ignoring\n") {
+		t.Errorf("output has no ...ignoring line:\n%s", got)
+	}
+	// Only the ignored failure gets one.
+	if n := strings.Count(got, "...ignoring"); n != 1 {
+		t.Errorf("...ignoring appears %d times, want 1", n)
+	}
+}

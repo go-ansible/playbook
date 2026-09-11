@@ -1123,9 +1123,45 @@ func (ec *execCtx) runDirective(ctx context.Context, task Task, st *hostState, a
 	case "assert":
 		r, e := ec.runAssert(args, st)
 		return r, true, e
+	case "debug":
+		// Only the var: form needs the engine. `var` names a variable to
+		// look up, and only the engine holds the host's variables — which
+		// is why real Ansible's debug is an action plugin. The msg: form
+		// needs nothing and falls through to the module.
+		name, ok := args["var"].(string)
+		if !ok {
+			return modules.Result{}, false, nil
+		}
+		return ec.runDebugVar(name, st), true, nil
 	default:
 		return modules.Result{}, false, nil
 	}
+}
+
+// runDebugVar implements `debug: {var: NAME}`. Real Ansible reports the
+// variable's VALUE keyed by its own name — {"d": {"a": 1}} — and sets no
+// msg at all. This port used to hand the module the bare name, so it
+// echoed the string "d" as both msg and var, printing the name of the
+// variable instead of what was in it.
+//
+// A name that resolves to nothing reports real Ansible's own
+// "VARIABLE IS NOT DEFINED!" rather than an empty value, so a typo in a
+// debug task looks like a typo.
+func (ec *execCtx) runDebugVar(name string, st *hostState) modules.Result {
+	merged := st.vc.Merged()
+	value, ok := merged[name]
+	if !ok {
+		// The name may be an expression rather than a bare variable
+		// ("ansible_facts.os_family"), which real Ansible also accepts.
+		if v, err := ec.engine.Template.Eval(name, merged); err == nil {
+			value, ok = v, true
+		}
+	}
+	if !ok {
+		value = "VARIABLE IS NOT DEFINED!"
+	}
+	return modules.Result{Extra: map[string]any{name: value}}.
+		WithExtra(verboseAlwaysKey, true)
 }
 
 // runAssert evaluates assert's `that` conditions here rather than in the
