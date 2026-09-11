@@ -557,11 +557,12 @@ func TestEngineOmitDropsModuleArgument(t *testing.T) {
   gather_facts: false
   vars:
     myvar: "set value"
+    varname: myvar
   tasks:
     - name: var kept when defined
       debug:
         msg: "fallback msg"
-        var: "{{ myvar | default(omit) }}"
+        var: "{{ varname | default(omit) }}"
       register: kept_result
 `))
 	if err != nil {
@@ -595,8 +596,11 @@ func TestEngineOmitDropsModuleArgument(t *testing.T) {
 	if !ok {
 		t.Fatal("no result recorded for the kept-var task")
 	}
-	if kept.Msg != "set value" {
-		t.Errorf(`kept task Msg = %q, want "set value" (var was defined, must not be omitted)`, kept.Msg)
+	// var: survived the omit, so debug took its var path: real Ansible
+	// reports the looked-up variable keyed by its own name, and sets no
+	// msg. (The msg: would only be used had var: been dropped.)
+	if got := kept.Extra["myvar"]; got != "set value" {
+		t.Errorf(`kept task Extra[myvar] = %#v, want "set value" (var was defined, must not be omitted)`, got)
 	}
 }
 

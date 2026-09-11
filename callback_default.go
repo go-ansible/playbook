@@ -1,12 +1,21 @@
 package playbook
 
 import (
+	"encoding/json"
 	"fmt"
+	"github.com/go-ansible/modules"
 	"io"
 	"sort"
 	"strings"
 	"sync"
 )
+
+// verboseAlwaysKey marks a result this callback should print in full
+// even without -v — real Ansible's own mechanism, and the reason a debug
+// task shows anything at all. The name comes from the modules package
+// rather than being spelled twice. Keys beginning "_ansible_" are
+// internal and never appear in the dump itself.
+const verboseAlwaysKey = modules.VerboseAlwaysKey
 
 const (
 	colorGreen  = "\033[0;32m"
@@ -56,8 +65,15 @@ func (c *DefaultCallback) OnPlayStart(play Play) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// An unnamed play is named after its hosts pattern, which is what
+	// real Ansible's Play.get_name() falls back to — measured: a play
+	// with `hosts: all` and no name banners as "PLAY [all]", not "PLAY".
+	name := strings.TrimSpace(play.Name)
+	if name == "" {
+		name = strings.TrimSpace(play.Hosts)
+	}
 	msg := "PLAY"
-	if name := strings.TrimSpace(play.Name); name != "" {
+	if name != "" {
 		msg = "PLAY [" + name + "]"
 	}
 	fmt.Fprintf(c.w, "\n%s\n", c.colorize(colorCyan, msg))
@@ -71,9 +87,17 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if r.Task != c.lastTask {
-		fmt.Fprintf(c.w, "\n%s\n", c.colorize(colorCyan, "TASK ["+r.Task+"]"))
-		c.lastTask = r.Task
+	// An unnamed task banners under its module, as real Ansible does —
+	// measured: a bare `- debug: {msg: x}` banners "TASK [debug]". This
+	// port printed "TASK []", or nothing at all when several unnamed
+	// tasks ran in a row.
+	banner := r.Task
+	if banner == "" {
+		banner = r.Module
+	}
+	if banner != c.lastTask {
+		fmt.Fprintf(c.w, "\n%s\n", c.colorize(colorCyan, "TASK ["+banner+"]"))
+		c.lastTask = banner
 	}
 	switch {
 	case r.Failed:
@@ -82,12 +106,17 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 			line += " => " + r.Msg
 		}
 		fmt.Fprintln(c.w, c.colorize(colorRed, line))
+		if r.Ignored {
+			// Real Ansible says so, on its own line, so a red line that
+			// did not stop the run is not mistaken for one that did.
+			fmt.Fprintln(c.w, c.colorize(colorCyan, "...ignoring"))
+		}
 	case r.Skipped:
 		fmt.Fprintln(c.w, c.colorize(colorCyan, fmt.Sprintf("skipping: [%s]", r.Host)))
 	case r.Changed:
-		fmt.Fprintln(c.w, c.colorize(colorYellow, fmt.Sprintf("changed: [%s]", r.Host)))
+		fmt.Fprintln(c.w, c.colorize(colorYellow, fmt.Sprintf("changed: [%s]", r.Host))+c.verboseDump(r))
 	default:
-		fmt.Fprintln(c.w, c.colorize(colorGreen, fmt.Sprintf("ok: [%s]", r.Host)))
+		fmt.Fprintln(c.w, c.colorize(colorGreen, fmt.Sprintf("ok: [%s]", r.Host))+c.verboseDump(r))
 	}
 }
 
@@ -118,4 +147,34 @@ func (c *DefaultCallback) OnStats(rr *RunResult) {
 		}
 		fmt.Fprintln(c.w, c.colorize(code, line))
 	}
+}
+
+// verboseDump renders the " => {...}" a result carrying
+// _ansible_verbose_always gets — what makes a debug task actually show
+// what it found. Real Ansible pretty-prints it at four spaces and sorts
+// the keys, and strips its own internal _ansible_* keys from the dump.
+// Returns the empty string for every other result, which is why an
+// ordinary command still prints one bare line.
+func (c *DefaultCallback) verboseDump(r Result) string {
+	if v, ok := r.Extra[verboseAlwaysKey].(bool); !ok || !v {
+		return ""
+	}
+	fields := map[string]any{}
+	if r.Msg != "" {
+		fields["msg"] = r.Msg
+	}
+	for k, v := range r.Extra {
+		if strings.HasPrefix(k, "_ansible_") {
+			continue
+		}
+		fields[k] = v
+	}
+	if len(fields) == 0 {
+		return ""
+	}
+	data, err := json.MarshalIndent(fields, "", "    ")
+	if err != nil {
+		return ""
+	}
+	return " => " + string(data)
 }
