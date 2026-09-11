@@ -1,9 +1,9 @@
 package playbook
 
 import (
-	"encoding/json"
 	"fmt"
 	"github.com/go-ansible/modules"
+	"github.com/go-ansible/template"
 	"io"
 	"sort"
 	"strings"
@@ -101,10 +101,17 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 	}
 	switch {
 	case r.Failed:
-		line := fmt.Sprintf("failed: [%s]", r.Host)
-		if r.Msg != "" {
-			line += " => " + r.Msg
+		// Real Ansible writes "fatal: [h]: FAILED! => {json}" with the
+		// whole result inline, which is how a reader sees WHY a command
+		// failed — its rc, its stderr. This port printed only the msg,
+		// so a failing shell task showed a return code and nothing else.
+		// An unreachable host gets its own UNREACHABLE! prefix there,
+		// measured the same way.
+		kind := "FAILED!"
+		if r.Unreachable {
+			kind = "UNREACHABLE!"
 		}
+		line := fmt.Sprintf("fatal: [%s]: %s => %s", r.Host, kind, c.resultJSON(r))
 		fmt.Fprintln(c.w, c.colorize(colorRed, line))
 		if r.Ignored {
 			// Real Ansible says so, on its own line, so a red line that
@@ -155,6 +162,34 @@ func (c *DefaultCallback) OnStats(rr *RunResult) {
 // the keys, and strips its own internal _ansible_* keys from the dump.
 // Returns the empty string for every other result, which is why an
 // ordinary command still prints one bare line.
+// resultJSON renders a result the way real Ansible inlines one on a
+// fatal line: compact, keys sorted, Python's ", "/": " separators, and
+// its own _ansible_* keys stripped. changed and msg are always present
+// there even when empty, and an unreachable result carries
+// unreachable: true.
+func (c *DefaultCallback) resultJSON(r Result) string {
+	fields := map[string]any{
+		"changed": r.Changed,
+		"msg":     r.Msg,
+	}
+	for k, v := range r.Extra {
+		if strings.HasPrefix(k, "_ansible_") {
+			continue
+		}
+		fields[k] = v
+	}
+	if r.Unreachable {
+		fields["unreachable"] = true
+	}
+	out, err := template.ToJSON(fields, 0)
+	if err != nil {
+		// Never worth losing the failure itself over a rendering
+		// problem: fall back to the message.
+		return r.Msg
+	}
+	return out
+}
+
 func (c *DefaultCallback) verboseDump(r Result) string {
 	if v, ok := r.Extra[verboseAlwaysKey].(bool); !ok || !v {
 		return ""
@@ -172,9 +207,9 @@ func (c *DefaultCallback) verboseDump(r Result) string {
 	if len(fields) == 0 {
 		return ""
 	}
-	data, err := json.MarshalIndent(fields, "", "    ")
+	data, err := template.ToJSON(fields, 4)
 	if err != nil {
 		return ""
 	}
-	return " => " + string(data)
+	return " => " + data
 }

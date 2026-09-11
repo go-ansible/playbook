@@ -272,3 +272,71 @@ func TestConformanceIgnoringLine(t *testing.T) {
 		t.Errorf("...ignoring appears %d times, want 1", n)
 	}
 }
+
+// TestConformanceFatalLine pins the shape of a failure line against real
+// ansible-core 2.21.4:
+//
+//	fatal: [h1]: FAILED! => {"changed": true, "cmd": "...", "rc": 3, ...}
+//
+// This port printed only "failed: [h] => msg", so a failing shell task
+// showed a return code and nothing else — not its stderr, not its
+// command. The whole result is inlined instead, which is how a reader
+// sees WHY it failed.
+func TestConformanceFatalLine(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: fails loudly
+      shell: echo to-stdout; echo to-stderr >&2; exit 3
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	e := New(localhostInventory())
+	e.Callbacks = []Callback{NewDefaultCallback(&buf, false)}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "fatal: [localhost]: FAILED! => {") {
+		t.Fatalf("no fatal line:\n%s", got)
+	}
+	// Everything a reader needs to see why it failed, in real Ansible's
+	// own JSON spelling — note ", " and ": ", and > left unescaped.
+	for _, want := range []string{
+		`"changed": true`,
+		`"msg": "The command exited with a non-zero return code."`,
+		`"rc": 3`,
+		`"stderr": "to-stderr"`,
+		`"stderr_lines": ["to-stderr"]`,
+		`"stdout": "to-stdout"`,
+		`"cmd": "echo to-stdout; echo to-stderr >&2; exit 3"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fatal line missing %s\n--- got ---\n%s", want, got)
+		}
+	}
+}
+
+// TestConformanceUnreachableLine covers the other prefix real Ansible
+// uses, measured against a host whose connection is refused:
+//
+//	fatal: [nope]: UNREACHABLE! => {..., "unreachable": true}
+func TestConformanceUnreachableLine(t *testing.T) {
+	var buf bytes.Buffer
+	cb := NewDefaultCallback(&buf, false)
+	cb.OnTaskResult(Result{
+		Host: "nope", Task: "t", Failed: true, Unreachable: true,
+		Msg: "Failed to connect to the host via ssh",
+	})
+	got := buf.String()
+	if !strings.Contains(got, "fatal: [nope]: UNREACHABLE! => {") {
+		t.Errorf("unreachable line = %q", got)
+	}
+	if !strings.Contains(got, `"unreachable": true`) {
+		t.Errorf("unreachable line has no unreachable field: %q", got)
+	}
+}
