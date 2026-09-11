@@ -85,7 +85,7 @@ func TestDefaultCallbackOutput(t *testing.T) {
 		"changed: [web2]\n" +
 		"\nTASK [configure]\n" +
 		"skipping: [web1]\n" +
-		"failed: [web2] => boom\n" +
+		"fatal: [web2]: FAILED! => {\"changed\": false, \"msg\": \"boom\"}\n" +
 		"\nPLAY RECAP\n" +
 		"web1                     : ok=1    changed=0    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0   \n" +
 		"web2                     : ok=1    changed=1    unreachable=0    failed=1    skipped=0    rescued=0    ignored=0   \n" +
