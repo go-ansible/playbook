@@ -1,9 +1,11 @@
 package playbook
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-ansible/inventory"
@@ -104,5 +106,90 @@ func assertMatchesGolden(t *testing.T, goldenPath, gotPath string) {
 	if string(got) != string(want) {
 		t.Errorf("%s differs from real ansible-core\n--- real ---\n%s\n--- this engine ---\n%s",
 			filepath.Base(goldenPath), want, got)
+	}
+}
+
+// TestConformanceRecap pins the PLAY RECAP line and the exit-code
+// question against real ansible-core 2.21.4, measured for a play that
+// has one of each outcome:
+//
+//	h1 : ok=4 changed=1 unreachable=0 failed=0 skipped=1 rescued=1 ignored=1
+//
+// The counting is not obvious and was wrong here in three ways: a
+// changed task also counts under ok, an IGNORED failure counts under ok
+// AND ignored (not failed), and a RESCUED one counts under rescued (not
+// failed). So a run whose only failures were ignored or rescued reports
+// failed=0 — and exits 0, which this port did not.
+func TestConformanceRecap(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: ok task
+      debug: {msg: fine}
+    - name: changed task
+      command: echo hi
+    - name: skipped task
+      debug: {msg: nope}
+      when: false
+    - name: ignored failure
+      command: /bin/false
+      ignore_errors: true
+    - name: rescued failure
+      block:
+        - command: /bin/false
+      rescue:
+        - debug: {msg: rescued}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := rr.Summary()["localhost"]
+	want := &HostSummary{Ok: 4, Changed: 1, Unreachable: 0, Failed: 0, Skipped: 1, Rescued: 1, Ignored: 1}
+	if *got != *want {
+		t.Errorf("summary = %+v, want %+v (real ansible-core 2.21.4)", *got, *want)
+	}
+
+	// The exit-code question: nothing here failed outright.
+	if rr.Failed() {
+		t.Error("Failed() = true, want false — every failure was ignored or rescued")
+	}
+
+	var buf bytes.Buffer
+	NewDefaultCallback(&buf, false).OnStats(rr)
+	wantLine := "localhost                : ok=4    changed=1    unreachable=0    failed=0    skipped=1    rescued=1    ignored=1   \n"
+	if !strings.HasSuffix(buf.String(), wantLine) {
+		t.Errorf("recap line =\n%q\nwant it to end with\n%q", buf.String(), wantLine)
+	}
+}
+
+// TestConformanceRecapRealFailureStillFails guards the other direction:
+// making ignored and rescued failures stop counting must not make a
+// genuine failure stop counting too.
+func TestConformanceRecapRealFailureStillFails(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - command: /bin/false
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr, err := New(localhostInventory()).RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rr.Failed() {
+		t.Error("Failed() = false for a genuine failure, want true")
+	}
+	if got := rr.Summary()["localhost"].Failed; got != 1 {
+		t.Errorf("failed = %d, want 1", got)
 	}
 }

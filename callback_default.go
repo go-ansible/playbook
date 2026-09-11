@@ -106,10 +106,12 @@ func (c *DefaultCallback) OnStats(rr *RunResult) {
 	sort.Strings(hosts)
 	for _, h := range hosts {
 		s := summary[h]
-		line := fmt.Sprintf("%-24s : ok=%-4d changed=%-4d failed=%-4d skipped=%-4d",
-			h, s.Ok+s.Changed, s.Changed, s.Failed, s.Skipped)
+		// Real Ansible's own column set and order. Ok already includes
+		// changed and ignored results, as it does there.
+		line := fmt.Sprintf("%-24s : ok=%-4d changed=%-4d unreachable=%-4d failed=%-4d skipped=%-4d rescued=%-4d ignored=%-4d",
+			h, s.Ok, s.Changed, s.Unreachable, s.Failed, s.Skipped, s.Rescued, s.Ignored)
 		code := colorGreen
-		if s.Failed > 0 {
+		if s.Failed > 0 || s.Unreachable > 0 {
 			code = colorRed
 		} else if s.Changed > 0 {
 			code = colorYellow
