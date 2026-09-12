@@ -14,7 +14,6 @@ import (
 	"strings"
 
 	"github.com/go-ansible/modules"
-	"gopkg.in/yaml.v3"
 )
 
 // Playbook is an ordered list of plays, as ansible-playbook reads it.
@@ -223,7 +222,7 @@ func ParseFileWithVault(path, vaultPassword string) (Playbook, error) {
 
 func parse(data []byte, baseDir, vaultPassword string) (Playbook, error) {
 	var raw []map[string]any
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	if err := vault.UnmarshalYAML(data, vaultPassword, &raw); err != nil {
 		return nil, fmt.Errorf("playbook: %w", err)
 	}
 	ctx := parseCtx{baseDir: baseDir, vaultPassword: vaultPassword}
@@ -879,7 +878,7 @@ func loadYAMLTaskFile(ctx parseCtx, path string, optional bool) ([]Task, error) 
 		return nil, err
 	}
 	var raw []map[string]any
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	if err := vault.UnmarshalYAML(data, ctx.vaultPassword, &raw); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	out := make([]Task, 0, len(raw))
@@ -906,8 +905,12 @@ func loadYAMLMap(path string, optional bool, vaultPassword string) (map[string]a
 		}
 		return nil, err
 	}
+	// Both shapes a secret takes: the whole file encrypted (already
+	// handled by the read above), or individual !vault-tagged scalars in
+	// an otherwise-readable vars file, which is the common way to keep
+	// one secret beside plaintext.
 	var m map[string]any
-	if err := yaml.Unmarshal(data, &m); err != nil {
+	if err := vault.UnmarshalYAML(data, vaultPassword, &m); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if m == nil {
