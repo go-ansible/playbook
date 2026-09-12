@@ -73,6 +73,13 @@ type Engine struct {
 	// still set Forks to 0 after New returns.
 	Forks int
 
+	// CheckMode runs the playbook without changing anything —
+	// ansible-playbook's --check. A module that honours a dry run is told
+	// so and reports what it WOULD do; one that does not is skipped
+	// rather than run, which is what real Ansible does and what keeps a
+	// dry run safe while modules gain support one at a time.
+	CheckMode bool
+
 	// Prompt implements vars_prompt's actual interactive prompting:
 	// given the fully-formatted message (already combining the prompt
 	// text and "[default]" the way real Ansible's own do_var_prompt
@@ -872,7 +879,9 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 					break
 				}
 				resolveRoleSrc(task, args)
-				if task.Async > 0 {
+				if skip, res := ec.checkModeGate(task, args); skip {
+					result = res
+				} else if task.Async > 0 {
 					result = ec.runAsyncTask(ctx, task, conn, args)
 				} else {
 					var rerr error
@@ -992,6 +1001,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		ec.report(pr, Result{
 			Host: st.name, Task: task.Name, Module: task.Module,
 			Changed: result.Changed, Failed: result.Failed,
+			Skipped: result.Skipped,
 			Ignored: result.Failed && task.IgnoreErrors,
 			Msg:     result.Msg, Extra: result.Extra,
 		})
@@ -1441,4 +1451,21 @@ func resolveRoleSrc(task Task, args map[string]any) {
 			return
 		}
 	}
+}
+
+// checkModeGate decides what a task does under --check. A module that
+// declares support is handed real Ansible's own _ansible_check_mode flag
+// and runs; one that does not is skipped with real Ansible's own reason,
+// never executed for real.
+func (ec *execCtx) checkModeGate(task Task, args map[string]any) (skip bool, res modules.Result) {
+	if !ec.engine.CheckMode {
+		return false, modules.Result{}
+	}
+	if !modules.SupportsCheckMode(task.Module) {
+		return true, modules.Skipped("remote module (" + task.Module + ") does not support check mode")
+	}
+	if args != nil {
+		args[modules.CheckModeKey] = true
+	}
+	return false, modules.Result{}
 }
