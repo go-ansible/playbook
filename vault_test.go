@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-ansible/vault"
@@ -98,5 +99,57 @@ func TestVaultEncryptedPlaybookAndIncludeVars(t *testing.T) {
 	}
 	if got != "from_include_vars" {
 		t.Errorf("include_vars secret = %q, want from_include_vars", got)
+	}
+}
+
+// TestInlineVaultScalarInVarsFile covers the shape ansible-vault
+// encrypt_string produces: one tagged secret in an otherwise-readable
+// vars file. Only whole-file encryption worked before.
+func TestInlineVaultScalarInVarsFile(t *testing.T) {
+	dir := t.TempDir()
+
+	enc, err := vault.Encrypt([]byte("s3cr3t"), "pw", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc strings.Builder
+	doc.WriteString("api_key: !vault |\n")
+	for _, line := range strings.Split(strings.TrimRight(enc, "\n"), "\n") {
+		doc.WriteString("          " + line + "\n")
+	}
+	doc.WriteString("region: eu-west\n")
+	writePlaybookFile(t, dir, "secrets.yml", doc.String())
+
+	pbPath := writePlaybookFile(t, dir, "site.yml", `
+- hosts: all
+  gather_facts: false
+  vars_files: [secrets.yml]
+  tasks:
+    - name: show
+      debug:
+        msg: "{{ api_key }}/{{ region }}"
+`)
+	pb, err := ParseFileWithVault(pbPath, "pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	e := New(localhostInventory())
+	e.OnResult = func(r Result) {
+		if r.Task == "show" {
+			got = r.Msg
+		}
+	}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	if got != "s3cr3t/eu-west" {
+		t.Errorf("rendered = %q, want the secret decrypted and the plaintext untouched", got)
+	}
+
+	// Without the password it fails clearly rather than yielding the
+	// ciphertext as a value.
+	if _, err := ParseFile(pbPath); err == nil {
+		t.Error("inline !vault with no password: got nil error, want one")
 	}
 }
