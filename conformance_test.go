@@ -340,3 +340,65 @@ func TestConformanceUnreachableLine(t *testing.T) {
 		t.Errorf("unreachable line has no unreachable field: %q", got)
 	}
 }
+
+// TestConformanceCheckMode pins the property that makes --check worth
+// having: nothing on disk changes. Measured against real ansible-core
+// 2.21.4, which runs a module that supports a dry run and SKIPS one that
+// does not — a copy reports changed and creates nothing, a command
+// reports skipping and never executes.
+func TestConformanceCheckMode(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "c.txt")
+	marker := filepath.Join(dir, "ran.txt")
+
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: copy
+      copy: {content: "x\n", dest: ` + dest + `}
+    - name: command
+      command: touch ` + marker + `
+    - name: unported module
+      file: {path: ` + filepath.Join(dir, "d") + `, state: directory}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	e.CheckMode = true
+	results := map[string]Result{}
+	e.OnResult = func(r Result) { results[r.Task] = r }
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Failed() {
+		t.Fatalf("check run failed: %+v", rr.Plays)
+	}
+
+	// A module that supports check mode says what it would do.
+	if !results["copy"].Changed {
+		t.Error("copy in check mode: want changed")
+	}
+	// Ones that do not are skipped, never run.
+	if !results["command"].Skipped {
+		t.Errorf("command in check mode: %+v, want skipped", results["command"])
+	}
+	if !results["unported module"].Skipped {
+		t.Errorf("an unported module must be skipped, got %+v", results["unported module"])
+	}
+
+	// The point of all of it: the filesystem is untouched.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("check mode changed the filesystem: %v", names)
+	}
+}
