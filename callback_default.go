@@ -2,12 +2,13 @@ package playbook
 
 import (
 	"fmt"
-	"github.com/go-ansible/modules"
-	"github.com/go-ansible/template"
 	"io"
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/go-ansible/modules"
+	"github.com/go-ansible/template"
 )
 
 // verboseAlwaysKey marks a result this callback should print in full
@@ -156,12 +157,6 @@ func (c *DefaultCallback) OnStats(rr *RunResult) {
 	}
 }
 
-// verboseDump renders the " => {...}" a result carrying
-// _ansible_verbose_always gets — what makes a debug task actually show
-// what it found. Real Ansible pretty-prints it at four spaces and sorts
-// the keys, and strips its own internal _ansible_* keys from the dump.
-// Returns the empty string for every other result, which is why an
-// ordinary command still prints one bare line.
 // resultJSON renders a result the way real Ansible inlines one on a
 // fatal line: compact, keys sorted, Python's ", "/": " separators, and
 // its own _ansible_* keys stripped. changed and msg are always present
@@ -190,6 +185,12 @@ func (c *DefaultCallback) resultJSON(r Result) string {
 	return out
 }
 
+// verboseDump renders the " => {...}" a result carrying
+// _ansible_verbose_always gets — what makes a debug task actually show
+// what it found. Real Ansible pretty-prints it at four spaces and sorts
+// the keys, and strips its own internal _ansible_* keys from the dump.
+// Returns the empty string for every other result, which is why an
+// ordinary command still prints one bare line.
 func (c *DefaultCallback) verboseDump(r Result) string {
 	if v, ok := r.Extra[verboseAlwaysKey].(bool); !ok || !v {
 		return ""
