@@ -1110,6 +1110,10 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			// .attempts expecting this exact value.
 			attemptView["attempts"] = totalAttempts - 1
 			result.Failed = true
+			// Real Ansible carries attempts in the RESULT too, not only
+			// in the registered variable, so a fatal line reports
+			// "attempts": 3 alongside rc and stderr.
+			result = result.WithExtra("attempts", totalAttempts-1)
 		}
 
 		if aborted {

@@ -142,6 +142,15 @@ func (rr *RunResult) Summary() map[string]*HostSummary {
 				// ignored failures still reports ok=N failed=0.
 				s.Ignored++
 				s.Ok++
+				// And under changed, if it changed something before it
+				// failed. Measured: a `shell` that writes and then
+				// exits non-zero under ignore_errors reports changed=1
+				// there and reported changed=0 here. A failure that is
+				// NOT ignored counts under neither, which is why this
+				// belongs in this branch rather than beside it.
+				if r.Changed {
+					s.Changed++
+				}
 			case r.Failed:
 				s.Failed++
 			case r.Changed:
