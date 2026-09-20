@@ -25,7 +25,7 @@ type recordingCallback struct {
 	stats   int
 }
 
-func (c *recordingCallback) OnPlayStart(play Play) {
+func (c *recordingCallback) OnPlayStart(play Play, hosts []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.plays = append(c.plays, play.Name)
@@ -66,7 +66,7 @@ func TestDefaultCallbackOutput(t *testing.T) {
 	var buf bytes.Buffer
 	cb := NewDefaultCallback(&buf, false)
 
-	cb.OnPlayStart(Play{Name: "deploy"})
+	cb.OnPlayStart(Play{Name: "deploy"}, []string{"h1"})
 	cb.OnTaskResult(Result{Host: "web1", Task: "install"})
 	cb.OnTaskResult(Result{Host: "web2", Task: "install", Changed: true})
 	cb.OnTaskResult(Result{Host: "web1", Task: "configure", Skipped: true})
@@ -98,7 +98,7 @@ func TestDefaultCallbackOutput(t *testing.T) {
 func TestDefaultCallbackUnnamedPlay(t *testing.T) {
 	var buf bytes.Buffer
 	// Real Ansible prints a bare "PLAY" banner for a play with no name.
-	NewDefaultCallback(&buf, false).OnPlayStart(Play{Name: "  "})
+	NewDefaultCallback(&buf, false).OnPlayStart(Play{Name: "  "}, []string{"h1"})
 	if got := buf.String(); got != "\nPLAY\n" {
 		t.Errorf("unnamed play banner = %q, want %q", got, "\nPLAY\n")
 	}
@@ -123,9 +123,9 @@ func TestDefaultCallbackColor(t *testing.T) {
 func TestDefaultCallbackRebannersPerPlay(t *testing.T) {
 	var buf bytes.Buffer
 	cb := NewDefaultCallback(&buf, false)
-	cb.OnPlayStart(Play{Name: "first"})
+	cb.OnPlayStart(Play{Name: "first"}, []string{"h1"})
 	cb.OnTaskResult(Result{Host: "h", Task: "shared"})
-	cb.OnPlayStart(Play{Name: "second"})
+	cb.OnPlayStart(Play{Name: "second"}, []string{"h1"})
 	cb.OnTaskResult(Result{Host: "h", Task: "shared"})
 
 	if n := strings.Count(buf.String(), "TASK [shared]"); n != 2 {
