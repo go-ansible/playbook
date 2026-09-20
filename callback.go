@@ -45,6 +45,16 @@ type Callback interface {
 	// carries which of those it is.
 	OnTaskResult(r Result)
 
+	// OnTaskRetry is raised after each failed attempt of a task with
+	// until:/retries: that is going to be tried again — real Ansible's
+	// v2_runner_retry. left is how many retries remain AFTER this one,
+	// counting down to zero on the last.
+	//
+	// Without it a long retry loop is indistinguishable from a hang:
+	// real Ansible says "FAILED - RETRYING: [h1]: name (2 retries
+	// left)." after each attempt, and this port said nothing at all.
+	OnTaskRetry(r Result, left int)
+
 	// OnStats is raised once at the end of a RunPlaybook call, whether
 	// or not it returned an error — real Ansible's
 	// v2_playbook_on_stats, the PLAY RECAP hook.
@@ -58,4 +68,5 @@ type BaseCallback struct{}
 
 func (BaseCallback) OnPlayStart(Play, []string) {}
 func (BaseCallback) OnTaskResult(Result)        {}
+func (BaseCallback) OnTaskRetry(Result, int)    {}
 func (BaseCallback) OnStats(*RunResult)         {}

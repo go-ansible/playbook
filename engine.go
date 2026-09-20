@@ -1061,6 +1061,16 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				break
 			}
 			if attempt < totalAttempts {
+				// Real Ansible counts down the retries REMAINING, so a
+				// task with retries: 3 reports 2, then 1, then 0 before
+				// its final failure. totalAttempts is 1 + retries.
+				for _, cb := range ec.engine.Callbacks {
+					cb.OnTaskRetry(Result{
+						Host: st.name, Task: task.Name, Module: task.Module,
+						Failed: true, Msg: result.Msg, Extra: result.Extra,
+						Delegate: delegate,
+					}, totalAttempts-1-attempt)
+				}
 				attemptView["retries"] = totalAttempts
 				attemptView["attempts"] = attempt + 1
 				if task.Register != "" {
