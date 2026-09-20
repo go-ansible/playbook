@@ -34,6 +34,13 @@ type Result struct {
 	// Engine.DiffMode and only for a module that reports one. A
 	// callback renders them; nothing in the engine reads them.
 	Diffs []modules.Diff
+
+	// Delegate is the host a delegate_to task actually ran against,
+	// already templated. Empty when the task ran on Host itself — and
+	// also empty for a task that was skipped, since a skipped task
+	// never connects anywhere. Real Ansible reports the pair as
+	// "ok: [web1 -> deploy1]".
+	Delegate string
 }
 
 // PlayResult aggregates every Result from one play, in the order

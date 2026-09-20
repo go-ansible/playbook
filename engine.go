@@ -640,7 +640,7 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	var stillActive []string
+	succeeded := make(map[string]bool, len(runOn))
 	for _, h := range runOn {
 		wg.Add(1)
 		go func(h string) {
@@ -653,12 +653,27 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 			if failed {
 				st.failed = true
 			} else {
-				stillActive = append(stillActive, h)
+				succeeded[h] = true
 			}
 			mu.Unlock()
 		}(h)
 	}
 	wg.Wait()
+
+	// Rebuilt by walking runOn in order rather than by appending as each
+	// goroutine finishes, so the active list stays in INVENTORY order.
+	// It used to come back in completion order, which made run_once pick
+	// whichever host happened to win the race: real Ansible always runs
+	// it on the play's first host, and measuring four runs gave h1 four
+	// times there against h2,h2,h2,h1 here. A run_once task that
+	// registers a variable would otherwise record a different
+	// inventory_hostname from one run to the next.
+	stillActive := make([]string, 0, len(runOn))
+	for _, h := range runOn {
+		if succeeded[h] {
+			stillActive = append(stillActive, h)
+		}
+	}
 
 	if len(passthrough) > 0 {
 		// Broadcast the run_once result to every other active host, so
@@ -896,6 +911,11 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 	anyChanged, anyFailed := false, false
 	var lastResult modules.Result
 	var lastExtra map[string]any
+	// Where the task actually ran, for the result to report. Stays
+	// empty for a task that never connected — which is why a skipped
+	// task shows no delegate, matching real Ansible's own
+	// "skipping: [h1]" for a delegated task.
+	delegate := ""
 
 	// loopResults collects one entry per iteration for a looped task's
 	// registered value — real Ansible's own `results` list. Nil for a
@@ -967,9 +987,10 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				break
 			}
 			if !handled {
-				conn, cerr := ec.connectionFor(ctx, task, mergedVars, st)
+				conn, dname, cerr := ec.connectionFor(ctx, task, mergedVars, st)
+				delegate = dname
 				if cerr != nil {
-					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: cerr.Error()})
+					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: cerr.Error(), Delegate: delegate})
 					anyFailed = true
 					aborted = true
 					break
@@ -1105,7 +1126,8 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			Skipped: result.Skipped,
 			Ignored: result.Failed && task.IgnoreErrors,
 			Msg:     result.Msg, Extra: result.Extra,
-			Diffs: result.Diffs,
+			Diffs:    result.Diffs,
+			Delegate: delegate,
 		})
 
 		// set_fact's/include_vars' variables are accessible by their
@@ -1188,27 +1210,31 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 // run against: the delegate_to target's connection if set (rendered as
 // a template, since delegate_to may reference a variable), otherwise
 // this host's own connection — wrapped in Become if escalation applies.
-func (ec *execCtx) connectionFor(ctx context.Context, task Task, mergedVars map[string]any, st *hostState) (remoteexec.Connection, error) {
+// It also returns the delegate's resolved name, so the result can
+// report WHERE the task ran; empty when the task ran on its own host.
+func (ec *execCtx) connectionFor(ctx context.Context, task Task, mergedVars map[string]any, st *hostState) (remoteexec.Connection, string, error) {
 	conn := st.conn
+	delegate := ""
 	if task.DelegateTo != "" {
 		delegateName, err := ec.engine.Template.Render(task.DelegateTo, mergedVars)
 		if err != nil {
-			return nil, fmt.Errorf("delegate_to: %w", err)
+			return nil, "", fmt.Errorf("delegate_to: %w", err)
 		}
+		delegate = delegateName
 		delegateVars := mergedVars
 		if hv := ec.engine.Inventory.HostVars(delegateName); len(hv) > 0 {
 			delegateVars = hv
 		}
 		dconn, err := ec.delegateConn(ctx, delegateName, delegateVars)
 		if err != nil {
-			return nil, fmt.Errorf("delegate_to %s: %w", delegateName, err)
+			return nil, delegate, fmt.Errorf("delegate_to %s: %w", delegateName, err)
 		}
 		conn = dconn
 	}
 	if becomeCfg, ok := becomeConfigFor(ec.play, task, mergedVars); ok {
 		conn = remoteexec.Become(conn, becomeCfg)
 	}
-	return conn, nil
+	return conn, delegate, nil
 }
 
 // runDirective handles the small set of task "modules" that must run

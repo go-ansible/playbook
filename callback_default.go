@@ -129,7 +129,7 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 		if r.Unreachable {
 			kind = "UNREACHABLE!"
 		}
-		line := fmt.Sprintf("fatal: [%s]: %s => %s", r.Host, kind, c.resultJSON(r))
+		line := fmt.Sprintf("fatal: [%s]: %s => %s", hostLabel(r), kind, c.resultJSON(r))
 		fmt.Fprintln(c.w, c.colorize(colorRed, line))
 		if r.Ignored {
 			// Real Ansible says so, on its own line, so a red line that
@@ -139,9 +139,9 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 	case r.Skipped:
 		fmt.Fprintln(c.w, c.colorize(colorCyan, fmt.Sprintf("skipping: [%s]", r.Host)))
 	case r.Changed:
-		fmt.Fprintln(c.w, c.colorize(colorYellow, fmt.Sprintf("changed: [%s]", r.Host))+c.verboseDump(r))
+		fmt.Fprintln(c.w, c.colorize(colorYellow, fmt.Sprintf("changed: [%s]", hostLabel(r)))+c.verboseDump(r))
 	default:
-		fmt.Fprintln(c.w, c.colorize(colorGreen, fmt.Sprintf("ok: [%s]", r.Host))+c.verboseDump(r))
+		fmt.Fprintln(c.w, c.colorize(colorGreen, fmt.Sprintf("ok: [%s]", hostLabel(r)))+c.verboseDump(r))
 	}
 }
 
@@ -230,4 +230,18 @@ func (c *DefaultCallback) verboseDump(r Result) string {
 		return ""
 	}
 	return " => " + data
+}
+
+// hostLabel is how real Ansible names the target of a result: the host
+// alone, or "host -> delegate" when the task ran somewhere else.
+// Deliberately NOT used for "skipping:", which real Ansible leaves
+// unannotated — a skipped task never connected anywhere, so there is no
+// delegation to report. Measured: a delegated task skipped by `when:`
+// prints "skipping: [h1]", while the same task run prints
+// "ok: [h1 -> h5]".
+func hostLabel(r Result) string {
+	if r.Delegate == "" || r.Delegate == r.Host {
+		return r.Host
+	}
+	return r.Host + " -> " + r.Delegate
 }
