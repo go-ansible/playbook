@@ -135,13 +135,16 @@ func TestConformanceRecap(t *testing.T) {
       debug: {msg: nope}
       when: false
     - name: ignored failure
-      command: /bin/false
+      fail: {msg: nope}
       ignore_errors: true
     - name: rescued failure
       block:
-        - command: /bin/false
+        - fail: {msg: boom}
       rescue:
         - debug: {msg: rescued}
+    - name: ignored AND changed
+      command: sh -c "exit 1"
+      ignore_errors: true
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -152,8 +155,15 @@ func TestConformanceRecap(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Measured from real ansible-core 2.21.4 running this exact
+	// playbook. The fixture used `command: /bin/false` until it turned
+	// out to be MACHINE-DEPENDENT: /bin/false does not exist on macOS,
+	// so real's command module failed before running anything and
+	// reported changed=false, while on Linux it runs and reports
+	// changed=true. `fail:` is unambiguous on both, and the last task
+	// covers the ignored-AND-changed case on purpose.
 	got := rr.Summary()["localhost"]
-	want := &HostSummary{Ok: 4, Changed: 1, Unreachable: 0, Failed: 0, Skipped: 1, Rescued: 1, Ignored: 1}
+	want := &HostSummary{Ok: 5, Changed: 2, Unreachable: 0, Failed: 0, Skipped: 1, Rescued: 1, Ignored: 2}
 	if *got != *want {
 		t.Errorf("summary = %+v, want %+v (real ansible-core 2.21.4)", *got, *want)
 	}
@@ -167,7 +177,7 @@ func TestConformanceRecap(t *testing.T) {
 	NewDefaultCallback(&buf, false).OnStats(rr)
 	// The trailing blank line is real ansible-core's own, measured with
 	// od on its output.
-	wantLine := "localhost                : ok=4    changed=1    unreachable=0    failed=0    skipped=1    rescued=1    ignored=1   \n\n"
+	wantLine := "localhost                : ok=5    changed=2    unreachable=0    failed=0    skipped=1    rescued=1    ignored=2   \n\n"
 	if !strings.HasSuffix(buf.String(), wantLine) {
 		t.Errorf("recap line =\n%q\nwant it to end with\n%q", buf.String(), wantLine)
 	}

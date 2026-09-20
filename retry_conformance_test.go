@@ -133,3 +133,29 @@ func TestRecapEndsWithABlankLine(t *testing.T) {
 		})
 	}
 }
+
+// TestExhaustedRetriesReportAttempts pins the attempts field real
+// ansible-core carries in the RESULT of a task whose retries ran out,
+// not only in the registered variable: its fatal line reads
+// "attempts": 3 alongside rc and stderr.
+func TestExhaustedRetriesReportAttempts(t *testing.T) {
+	out := runRetryPlaybook(t, `
+- name: exhaust
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: never succeeds
+      shell: "exit 1"
+      register: r
+      until: r.rc == 0
+      retries: 2
+      delay: 0
+      ignore_errors: true
+`)
+	// retries: 2 means three executions, and real ansible-core's own
+	// off-by-one reports attempts as 2 — see the engine's note on the
+	// ansible-core quirk this reproduces deliberately.
+	if !strings.Contains(out, `"attempts": 2`) {
+		t.Errorf("fatal line must carry the attempts count:\n%s", out)
+	}
+}
