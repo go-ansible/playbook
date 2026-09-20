@@ -23,7 +23,11 @@ const (
 	colorYellow = "\033[0;33m"
 	colorRed    = "\033[0;31m"
 	colorCyan   = "\033[0;36m"
-	colorReset  = "\033[0m"
+	// COLOR_DEBUG's default, "dark gray", which real Ansible uses
+	// for the retry line. Confirmed both in ansible/constants.py and
+	// by capturing the real escape from a coloured run.
+	colorDarkGray = "\033[1;30m"
+	colorReset    = "\033[0m"
 )
 
 // DefaultCallback prints a run the way ansible-playbook prints it to a
@@ -143,6 +147,22 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 	default:
 		fmt.Fprintln(c.w, c.colorize(colorGreen, fmt.Sprintf("ok: [%s]", hostLabel(r)))+c.verboseDump(r))
 	}
+}
+
+// OnTaskRetry prints real Ansible's own retry line, verbatim from
+// default.py's v2_runner_retry — including its unpluralised "1 retries
+// left" and the trailing full stop. An unnamed task is named after its
+// module, the same fallback the task banner uses.
+func (c *DefaultCallback) OnTaskRetry(r Result, left int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	name := r.Task
+	if name == "" {
+		name = r.Module
+	}
+	line := fmt.Sprintf("FAILED - RETRYING: [%s]: %s (%d retries left).", hostLabel(r), name, left)
+	fmt.Fprintln(c.w, c.colorize(colorDarkGray, line))
 }
 
 func (c *DefaultCallback) OnStats(rr *RunResult) {
