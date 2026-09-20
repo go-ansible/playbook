@@ -100,6 +100,14 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 		fmt.Fprintf(c.w, "\n%s\n", c.colorize(colorCyan, "TASK ["+banner+"]"))
 		c.lastTask = banner
 	}
+	// Real Ansible's default callback emits the diff before the line
+	// that says what happened, so the reader sees the change and then
+	// its verdict. Measured from a real --diff --check run, which also
+	// showed the blank line renderDiff leaves after each one.
+	for _, d := range r.Diffs {
+		fmt.Fprint(c.w, renderDiff(d, c.colorize))
+	}
+
 	switch {
 	case r.Failed:
 		// Real Ansible writes "fatal: [h]: FAILED! => {json}" with the

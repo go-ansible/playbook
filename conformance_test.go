@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/go-ansible/inventory"
+
+	"github.com/go-ansible/modules"
 )
 
 // The fixtures under testdata/conformance are run through THIS engine and
@@ -346,6 +348,12 @@ func TestConformanceUnreachableLine(t *testing.T) {
 // 2.21.4, which runs a module that supports a dry run and SKIPS one that
 // does not — a copy reports changed and creates nothing, a command
 // reports skipping and never executes.
+// unportedModule is a module with no check-mode support, used to prove
+// such a module is skipped rather than run. It writes into the test's
+// own directory if it ever DOES run, so the "filesystem untouched"
+// assertion below catches a regression rather than missing it.
+const unportedModule = "assemble"
+
 func TestConformanceCheckMode(t *testing.T) {
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "c.txt")
@@ -360,11 +368,20 @@ func TestConformanceCheckMode(t *testing.T) {
     - name: command
       command: touch ` + marker + `
     - name: unported module
-      file: {path: ` + filepath.Join(dir, "d") + `, state: directory}
+      ` + unportedModule + `: {src: ` + dir + `, dest: ` + filepath.Join(dir, "assembled") + `}
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The fixture above needs a module that genuinely has no check-mode
+	// support, and the support list grows over time: `file` was this
+	// test's example until it gained support, at which point the test
+	// silently stopped testing what it says it tests. Asserting the
+	// premise makes that rot loud instead.
+	if modules.SupportsCheckMode(unportedModule) {
+		t.Fatalf("%s now supports check mode; pick another module for this fixture", unportedModule)
+	}
+
 	e := New(localhostInventory())
 	e.CheckMode = true
 	results := map[string]Result{}

@@ -1,6 +1,10 @@
 package playbook
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/go-ansible/modules"
+)
 
 // Result is one task's outcome on one host (one per loop iteration when
 // a task loops).
@@ -25,6 +29,11 @@ type Result struct {
 
 	Msg   string
 	Extra map[string]any
+
+	// Diffs is what the task changed, present only under
+	// Engine.DiffMode and only for a module that reports one. A
+	// callback renders them; nothing in the engine reads them.
+	Diffs []modules.Diff
 }
 
 // PlayResult aggregates every Result from one play, in the order
