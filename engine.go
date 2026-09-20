@@ -80,6 +80,17 @@ type Engine struct {
 	// dry run safe while modules gain support one at a time.
 	CheckMode bool
 
+	// DiffMode makes modules report what they changed —
+	// ansible-playbook's --diff. A module that supports it returns the
+	// before and after contents, which the callbacks render as a unified
+	// diff; one that does not simply reports nothing extra, exactly as
+	// in real Ansible, so turning it on is never destructive and never
+	// fails a run.
+	//
+	// It composes with CheckMode: --diff --check shows the diff of a
+	// change that is deliberately not made.
+	DiffMode bool
+
 	// Prompt implements vars_prompt's actual interactive prompting:
 	// given the fully-formatted message (already combining the prompt
 	// text and "[default]" the way real Ansible's own do_var_prompt
@@ -879,6 +890,11 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 					break
 				}
 				resolveRoleSrc(task, args)
+				// Real Ansible sends _ansible_diff to every module,
+				// whether or not it knows what to do with one.
+				if ec.engine.DiffMode && args != nil {
+					args[modules.DiffModeKey] = true
+				}
 				if skip, res := ec.checkModeGate(task, args); skip {
 					result = res
 				} else if task.Async > 0 {
@@ -1004,6 +1020,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			Skipped: result.Skipped,
 			Ignored: result.Failed && task.IgnoreErrors,
 			Msg:     result.Msg, Extra: result.Extra,
+			Diffs: result.Diffs,
 		})
 
 		// set_fact's/include_vars' variables are accessible by their
