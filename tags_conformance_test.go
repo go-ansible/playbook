@@ -224,3 +224,71 @@ all:
 	}
 	return inv
 }
+
+// TestTagFilteredTasksLeaveNoTraceInTheTranscript compares the WHOLE
+// transcript, not just which tasks ran. The earlier tag tables compared
+// only the messages the selected tasks printed, which is exactly why
+// they could not see that the excluded ones were each printing a
+// "skipping:" line and inflating the recap's skipped count.
+//
+// The expected text is real ansible-core's own output for this playbook
+// with --tags alpha, banner padding aside.
+func TestTagFilteredTasksLeaveNoTraceInTheTranscript(t *testing.T) {
+	pb, err := Parse([]byte(strings.Replace(tagConformancePlaybook, "hosts: all", "hosts: all", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	e := New(localhostInventory())
+	e.RunTags = []string{"alpha"}
+	e.Callbacks = []Callback{NewDefaultCallback(&buf, false)}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+
+	// Nothing at all for the four unselected tasks.
+	for _, absent := range []string{"TASK [plain]", "TASK [beta]", "TASK [never]", "skipping:"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("transcript contains %q, which real ansible-core does not print:\n%s", absent, out)
+		}
+	}
+	for _, present := range []string{"TASK [alpha]", "TASK [always]"} {
+		if !strings.Contains(out, present) {
+			t.Errorf("transcript is missing %q:\n%s", present, out)
+		}
+	}
+	// And the recap counts none of them as skipped.
+	if !strings.Contains(out, "skipped=0") {
+		t.Errorf("recap must report skipped=0 — tags select, they do not skip:\n%s", out)
+	}
+}
+
+// TestRetryLinesComeAfterTheTaskBanner pins the ORDER real ansible-core
+// prints: the banner, then the retries, then the outcome. The banner
+// used to be emitted only on a task's first RESULT, which put the retry
+// lines above it.
+func TestRetryLinesComeAfterTheTaskBanner(t *testing.T) {
+	out := runRetryPlaybook(t, `
+- name: exhaust
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: never succeeds
+      shell: "exit 1"
+      register: r
+      until: r.rc == 0
+      retries: 2
+      delay: 0
+      ignore_errors: true
+`)
+	banner := strings.Index(out, "TASK [never succeeds]")
+	retry := strings.Index(out, "FAILED - RETRYING")
+	fatal := strings.Index(out, "fatal:")
+	if banner < 0 || retry < 0 || fatal < 0 {
+		t.Fatalf("missing one of banner/retry/fatal:\n%s", out)
+	}
+	if !(banner < retry && retry < fatal) {
+		t.Errorf("want banner < retry < fatal, got %d/%d/%d:\n%s", banner, retry, fatal, out)
+	}
+}

@@ -105,14 +105,7 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 	// measured: a bare `- debug: {msg: x}` banners "TASK [debug]". This
 	// port printed "TASK []", or nothing at all when several unnamed
 	// tasks ran in a row.
-	banner := r.Task
-	if banner == "" {
-		banner = r.Module
-	}
-	if banner != c.lastTask {
-		fmt.Fprintf(c.w, "\n%s\n", c.colorize(colorCyan, "TASK ["+banner+"]"))
-		c.lastTask = banner
-	}
+	c.taskBanner(r)
 	// Real Ansible's default callback emits the diff before the line
 	// that says what happened, so the reader sees the change and then
 	// its verdict. Measured from a real --diff --check run, which also
@@ -149,6 +142,25 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 	}
 }
 
+// taskBanner prints the TASK banner for r unless it is already the
+// banner showing. The caller must hold c.mu.
+//
+// Both OnTaskResult and OnTaskRetry go through it, because a retried
+// task reports its retries BEFORE it ever produces a result: real
+// ansible-core prints the banner, then the FAILED - RETRYING lines,
+// then the outcome, and banner-on-first-result-only put the retries
+// above the banner instead.
+func (c *DefaultCallback) taskBanner(r Result) {
+	banner := r.Task
+	if banner == "" {
+		banner = r.Module
+	}
+	if banner != c.lastTask {
+		fmt.Fprintf(c.w, "\n%s\n", c.colorize(colorCyan, "TASK ["+banner+"]"))
+		c.lastTask = banner
+	}
+}
+
 // OnTaskRetry prints real Ansible's own retry line, verbatim from
 // default.py's v2_runner_retry — including its unpluralised "1 retries
 // left" and the trailing full stop. An unnamed task is named after its
@@ -156,6 +168,8 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 func (c *DefaultCallback) OnTaskRetry(r Result, left int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	c.taskBanner(r)
 
 	name := r.Task
 	if name == "" {

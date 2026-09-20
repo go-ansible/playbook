@@ -173,20 +173,21 @@ func TestEngineTagsRunTagsFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var ranA, skippedB bool
+	// A task excluded by tags produces NO result at all — real
+	// ansible-core does not banner it, does not print "skipping:" for
+	// it, and does not count it in the recap. This test asserted it
+	// came back Skipped until that was measured.
+	var ranA bool
 	for _, r := range resultsFor(rr, "localhost") {
 		if r.Task == "tagged a" && !r.Skipped {
 			ranA = true
 		}
-		if r.Task == "tagged b" && r.Skipped {
-			skippedB = true
+		if r.Task == "tagged b" {
+			t.Errorf("tagged b is not in RunTags, so real ansible-core reports nothing for it; got %+v", r)
 		}
 	}
 	if !ranA {
 		t.Error("tagged a should have run")
-	}
-	if !skippedB {
-		t.Error("tagged b should have been skipped (not in RunTags)")
 	}
 }
 
@@ -208,9 +209,11 @@ func TestEngineTagsSkipTagsFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// As above: excluded by tags means absent from the report, not
+	// present and marked skipped.
 	for _, r := range resultsFor(rr, "localhost") {
-		if r.Task == "tagged skip-me" && !r.Skipped {
-			t.Fatal("task tagged skip-me should have been skipped")
+		if r.Task == "tagged skip-me" {
+			t.Fatalf("a task excluded by --skip-tags is reported by neither engine; got %+v", r)
 		}
 	}
 }

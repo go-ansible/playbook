@@ -618,10 +618,18 @@ func mergeOnto(base, overlay map[string]any) map[string]any {
 // from being excluded whenever RunTags is non-empty, so runHandlers
 // must skip the check entirely).
 func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string, pr *PlayResult, filterTags bool) []string {
+	// A task excluded by tags produces NO result at all — no banner, no
+	// "skipping:" line, and nothing in the recap. Measured: real
+	// ansible-core running this port's own tag playbook with
+	// --tags alpha shows only the two selected tasks and reports
+	// skipped=0, where this port showed three "skipping: [h1]" lines
+	// and skipped=3.
+	//
+	// That is the difference between SELECTION and skipping: tags
+	// decide which tasks are in the play at all, whereas when: skips a
+	// task that is. Reporting the first as the second also made the
+	// recap's own skipped count wrong.
 	if filterTags && !tagsMatch(task.Tags, ec.engine.RunTags, ec.engine.SkipTags) {
-		for _, h := range active {
-			ec.report(pr, Result{Host: h, Task: task.Name, Module: task.Module, Skipped: true, Msg: "tags"})
-		}
 		return active
 	}
 
