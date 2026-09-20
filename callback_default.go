@@ -192,6 +192,12 @@ func (c *DefaultCallback) OnStats(rr *RunResult) {
 		}
 		fmt.Fprintln(c.w, c.colorize(code, line))
 	}
+
+	// Real Ansible ends its output with a blank line after the recap —
+	// measured with od on both a play that had hosts and one that
+	// matched none, so it is unconditional rather than a side effect of
+	// the rows above.
+	fmt.Fprintln(c.w)
 }
 
 // resultJSON renders a result the way real Ansible inlines one on a
