@@ -165,7 +165,9 @@ func TestConformanceRecap(t *testing.T) {
 
 	var buf bytes.Buffer
 	NewDefaultCallback(&buf, false).OnStats(rr)
-	wantLine := "localhost                : ok=4    changed=1    unreachable=0    failed=0    skipped=1    rescued=1    ignored=1   \n"
+	// The trailing blank line is real ansible-core's own, measured with
+	// od on its output.
+	wantLine := "localhost                : ok=4    changed=1    unreachable=0    failed=0    skipped=1    rescued=1    ignored=1   \n\n"
 	if !strings.HasSuffix(buf.String(), wantLine) {
 		t.Errorf("recap line =\n%q\nwant it to end with\n%q", buf.String(), wantLine)
 	}

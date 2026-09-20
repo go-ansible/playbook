@@ -89,7 +89,11 @@ func TestDefaultCallbackOutput(t *testing.T) {
 		"\nPLAY RECAP\n" +
 		"web1                     : ok=1    changed=0    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0   \n" +
 		"web2                     : ok=1    changed=1    unreachable=0    failed=1    skipped=0    rescued=0    ignored=0   \n" +
-		"web3                     : ok=1    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   \n"
+		"web3                     : ok=1    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   \n" +
+		// Real ansible-core ends its output with a blank line after the
+		// recap — measured with od, not assumed. This test asserted the
+		// opposite until then.
+		"\n"
 	if got := buf.String(); got != want {
 		t.Errorf("output =\n%q\nwant\n%q", got, want)
 	}

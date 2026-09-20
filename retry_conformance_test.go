@@ -110,3 +110,26 @@ func runRetryPlaybook(t *testing.T, src string) string {
 	}
 	return buf.String()
 }
+
+// TestRecapEndsWithABlankLine pins the trailing blank line real
+// ansible-core prints after PLAY RECAP. Measured with od on both a play
+// that had hosts and one that matched none.
+func TestRecapEndsWithABlankLine(t *testing.T) {
+	for _, tt := range []struct{ name, hosts string }{
+		{"with hosts", "all"},
+		{"no hosts matched", "nosuchgroup"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out := runRetryPlaybook(t, `
+- name: p
+  hosts: `+tt.hosts+`
+  gather_facts: false
+  tasks:
+    - {name: t, debug: {msg: x}}
+`)
+			if !strings.HasSuffix(out, "\n\n") {
+				t.Errorf("output must end with a blank line, got %q", out[max(0, len(out)-24):])
+			}
+		})
+	}
+}
