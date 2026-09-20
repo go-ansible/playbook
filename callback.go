@@ -25,9 +25,19 @@ package playbook
 // from ordinary task runs here, so there is nothing to raise real
 // Ansible's separate v2_playbook_on_handler_task_start from.
 type Callback interface {
-	// OnPlayStart is raised once per play, before its hosts are
-	// resolved — real Ansible's v2_playbook_on_play_start.
-	OnPlayStart(play Play)
+	// OnPlayStart is raised once per BATCH of a play, with the hosts
+	// that batch will run against — real Ansible's
+	// v2_playbook_on_play_start. A play without serial: has exactly one
+	// batch containing every matched host, so this is once per play in
+	// the common case; a play WITH serial: raises it once per batch,
+	// which is what makes batch boundaries visible in the output, as
+	// they are in real Ansible.
+	//
+	// hosts is empty when the play's pattern matched nothing. Real
+	// Ansible still banners such a play and then says "skipping: no
+	// hosts matched", so a mistyped pattern does not read as a
+	// successful empty run.
+	OnPlayStart(play Play, hosts []string)
 
 	// OnTaskResult is raised for every task result on every host, one
 	// per loop iteration when a task loops. It covers what real Ansible
@@ -46,6 +56,6 @@ type Callback interface {
 // own all-no-op defaults.
 type BaseCallback struct{}
 
-func (BaseCallback) OnPlayStart(Play)    {}
-func (BaseCallback) OnTaskResult(Result) {}
-func (BaseCallback) OnStats(*RunResult)  {}
+func (BaseCallback) OnPlayStart(Play, []string) {}
+func (BaseCallback) OnTaskResult(Result)        {}
+func (BaseCallback) OnStats(*RunResult)         {}

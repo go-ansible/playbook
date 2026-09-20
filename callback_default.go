@@ -62,7 +62,7 @@ func (c *DefaultCallback) colorize(code, s string) string {
 	return code + s + colorReset
 }
 
-func (c *DefaultCallback) OnPlayStart(play Play) {
+func (c *DefaultCallback) OnPlayStart(play Play, hosts []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -78,6 +78,15 @@ func (c *DefaultCallback) OnPlayStart(play Play) {
 		msg = "PLAY [" + name + "]"
 	}
 	fmt.Fprintf(c.w, "\n%s\n", c.colorize(colorCyan, msg))
+
+	// Real Ansible says so rather than printing nothing, so a mistyped
+	// host pattern is distinguishable from a play that genuinely had
+	// no work. (Real also emits a "[WARNING]: Could not match supplied
+	// host pattern" line on STDERR; this callback holds only the one
+	// output stream, so that line is a remaining gap.)
+	if len(hosts) == 0 {
+		fmt.Fprintln(c.w, "skipping: no hosts matched")
+	}
 
 	// A new play re-banners its first task even when the previous play
 	// ended on a task of the same name.

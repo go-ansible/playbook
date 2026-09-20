@@ -296,10 +296,6 @@ func (e *Engine) applyVarsPrompt(play *Play) error {
 func (e *Engine) runPlay(ctx context.Context, play Play) (*PlayResult, error) {
 	pr := newPlayResult(play.Name)
 
-	for _, cb := range e.Callbacks {
-		cb.OnPlayStart(play)
-	}
-
 	hosts, err := e.Inventory.Match(play.Hosts)
 	if err != nil {
 		return pr, fmt.Errorf("play %q: %w", play.Name, err)
@@ -310,7 +306,21 @@ func (e *Engine) runPlay(ctx context.Context, play Play) (*PlayResult, error) {
 	// batch starts (real Ansible's rolling-update semantics). serial<=0
 	// (the default, "all hosts at once") is one batch containing every
 	// host, identical to pre-serial behavior.
+	//
+	// The play-start hook fires once per BATCH, not once per play: real
+	// Ansible re-banners the play for each batch, which is what makes
+	// the boundaries of a rolling update visible while it runs. A play
+	// without serial: has one batch, so this is unchanged for it — and
+	// a play that matched no hosts still has one (empty) batch, so it
+	// is still bannered.
 	for _, batch := range batchHosts(hosts, play.Serial) {
+		names := make([]string, 0, len(batch))
+		for _, h := range batch {
+			names = append(names, h.Name)
+		}
+		for _, cb := range e.Callbacks {
+			cb.OnPlayStart(play, names)
+		}
 		e.runBatch(ctx, play, batch, pr)
 	}
 	return pr, nil
@@ -672,17 +682,92 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 	return stillActive
 }
 
+// untaggedTag is the tag real Ansible implicitly gives a task that
+// declares none (Taggable.untagged, a frozenset of exactly this one
+// name). It is what makes `--tags untagged` and `--skip-tags untagged`
+// able to select those tasks at all.
+const untaggedTag = "untagged"
+
+// tagsMatch is a port of real Ansible's Taggable.evaluate_tags
+// (ansible/playbook/taggable.py), which is more than an intersection
+// test: `all`, `tagged`, `untagged`, `always` and `never` are special
+// names on both sides, and the run side is evaluated BEFORE the skip
+// side rather than the other way round.
+//
+// An EMPTY run list means `all` here, not "no filter". Real Ansible does
+// that substitution in its CLI rather than its config
+// (ansible/cli/__init__.py post_process_args, whose own comment explains
+// why: making ["all"] the config default would turn `--tags foo` into
+// ["all", "foo"]). It is applied here instead of in this port's CLI so
+// that every entry point gets it — a task tagged `never` running by
+// default is a safety failure, and guarding a destructive task is the
+// only thing `never` is for.
 func tagsMatch(effective, run, skip []string) bool {
-	if intersects(effective, skip) {
-		return false
+	tags := effectiveTagSet(effective)
+	// "tags != self.untagged" in the original: the set is EXACTLY the
+	// implicit one, not merely small.
+	onlyUntagged := len(tags) == 1 && tags[untaggedTag]
+
+	only := tagSet(run)
+	if len(only) == 0 {
+		only = map[string]bool{"all": true}
 	}
-	if len(run) == 0 {
-		return true
+
+	shouldRun := false
+	switch {
+	case tags["always"]:
+		shouldRun = true
+	case only["all"] && !tags["never"]:
+		shouldRun = true
+	case intersectsSet(tags, only):
+		shouldRun = true
+	case only["tagged"] && !onlyUntagged && !tags["never"]:
+		shouldRun = true
 	}
-	if contains(effective, "always") {
-		return true
+
+	if shouldRun && len(skip) > 0 {
+		sk := tagSet(skip)
+		switch {
+		case sk["all"]:
+			// Everything goes, except `always` tasks — unless `always`
+			// was itself named as something to skip.
+			if !tags["always"] || sk["always"] {
+				shouldRun = false
+			}
+		case intersectsSet(tags, sk):
+			shouldRun = false
+		case sk["tagged"] && !onlyUntagged:
+			shouldRun = false
+		}
 	}
-	return intersects(effective, run)
+	return shouldRun
+}
+
+// effectiveTagSet is a task's own tags, or the implicit {"untagged"}
+// when it declares none.
+func effectiveTagSet(tags []string) map[string]bool {
+	set := tagSet(tags)
+	if len(set) == 0 {
+		return map[string]bool{untaggedTag: true}
+	}
+	return set
+}
+
+func tagSet(tags []string) map[string]bool {
+	set := make(map[string]bool, len(tags))
+	for _, t := range tags {
+		set[t] = true
+	}
+	return set
+}
+
+func intersectsSet(a, b map[string]bool) bool {
+	for k := range a {
+		if b[k] {
+			return true
+		}
+	}
+	return false
 }
 
 func intersects(a, b []string) bool {
