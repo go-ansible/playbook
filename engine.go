@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -326,19 +327,80 @@ func (e *Engine) runPlay(ctx context.Context, play Play) (*PlayResult, error) {
 	return pr, nil
 }
 
-func batchHosts(hosts []*inventory.Host, serial int) [][]*inventory.Host {
-	if serial <= 0 || serial >= len(hosts) {
-		return [][]*inventory.Host{hosts}
+// batchHosts splits hosts into the rolling-update batches serial asks
+// for — a port of real Ansible's _get_serialized_batches
+// (ansible/executor/playbook_executor.py).
+//
+// Each entry is a count or a percentage; the list is consumed in order
+// and its LAST entry repeats until every host has run, so
+// `serial: [1, 2]` over five hosts gives batches of 1, 2 and 2. An
+// entry that resolves to zero or less means "all the rest, in one
+// batch", which is what an absent serial: does.
+//
+// A percentage is always of the play's TOTAL host count, not of the
+// hosts still waiting.
+func batchHosts(hosts []*inventory.Host, serial []string) [][]*inventory.Host {
+	// A play whose pattern matched nothing still gets one (empty)
+	// batch, so it is still bannered and still reports that it matched
+	// no hosts. Real Ansible produces no batches here and handles that
+	// case outside the loop; one empty batch is the same thing in the
+	// shape this engine uses.
+	if len(hosts) == 0 {
+		return [][]*inventory.Host{nil}
 	}
+	if len(serial) == 0 {
+		serial = []string{"-1"}
+	}
+
+	total := len(hosts)
+	remaining := hosts
 	var out [][]*inventory.Host
-	for i := 0; i < len(hosts); i += serial {
-		end := i + serial
-		if end > len(hosts) {
-			end = len(hosts)
+	for cur := 0; len(remaining) > 0; {
+		n := pctToInt(serial[cur], total)
+		if n <= 0 {
+			// Not an error: real Ansible treats it as "everything that
+			// is left", which is how serial: 0 means no batching.
+			out = append(out, remaining)
+			break
 		}
-		out = append(out, hosts[i:end])
+		if n > len(remaining) {
+			n = len(remaining)
+		}
+		out = append(out, remaining[:n])
+		remaining = remaining[n:]
+		if cur < len(serial)-1 {
+			cur++
+		}
 	}
 	return out
+}
+
+// pctToInt is real Ansible's own helper (ansible/utils/helpers.py): a
+// "N%" entry becomes a fraction of total, anything else is read as a
+// plain integer. A percentage that works out to zero becomes one, so a
+// tiny percentage of a small fleet still makes progress rather than
+// looping forever.
+//
+// The percentage is computed in FLOATING POINT and truncated, exactly
+// as Python's int((pct / 100.0) * total) does, because the two disagree:
+// 29% of 100 hosts is 28 there (0.29*100 is 28.999999999999996), not
+// 29. Measured against a real 100-host run, which batches 28/28/28/16.
+func pctToInt(value string, total int) int {
+	if pct, ok := strings.CutSuffix(value, "%"); ok {
+		p, err := strconv.Atoi(strings.TrimSpace(pct))
+		if err != nil {
+			return 0
+		}
+		if n := int(float64(p) / 100.0 * float64(total)); n != 0 {
+			return n
+		}
+		return 1
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Host, pr *PlayResult) {
