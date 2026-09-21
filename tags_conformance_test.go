@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-ansible/inventory"
@@ -122,11 +123,16 @@ func runTagPlaybook(t *testing.T, src string, run, skip []string) string {
 	e.RunTags = run
 	e.SkipTags = skip
 
+	// Serialised because OnResult arrives from one goroutine per host.
+	var mu sync.Mutex
 	var ran []string
 	e.OnResult = func(r Result) {
-		if !r.Skipped {
-			ran = append(ran, r.Task)
+		if r.Skipped {
+			return
 		}
+		mu.Lock()
+		defer mu.Unlock()
+		ran = append(ran, r.Task)
 	}
 	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
 		t.Fatal(err)
@@ -210,8 +216,10 @@ func TestPlayThatMatchedNoHostsSaysSo(t *testing.T) {
 // measured against: five hosts, all reached locally, so batching is
 // observable without any remote machine.
 func fiveHostInventory() *inventory.Inventory {
+	// Grouped under `web` so a group pattern is testable; every host
+	// still belongs to `all`.
 	inv, err := inventory.ParseYAML([]byte(`
-all:
+web:
   hosts:
     h1: {ansible_connection: local}
     h2: {ansible_connection: local}

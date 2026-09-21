@@ -81,6 +81,20 @@ type Engine struct {
 	// dry run safe while modules gain support one at a time.
 	CheckMode bool
 
+	// Limit restricts every play to hosts matching this pattern as well
+	// as their own — ansible-playbook's --limit. It takes the same
+	// pattern language as a play's hosts:, so "web:!web3" and "@file"
+	// style subsets work the same way, and it INTERSECTS rather than
+	// replaces: a play already narrower than the limit stays narrow.
+	//
+	// A limit that leaves the whole inventory with nothing to target is
+	// an error in real Ansible rather than a silent no-op — but that
+	// check belongs to the CLI, which makes it ONCE against "all"
+	// before any play runs (ansible/cli/__init__.py get_host_list).
+	// That is why a play whose own hosts: matches nothing is not an
+	// error while a --limit matching nothing is.
+	Limit string
+
 	// DiffMode makes modules report what they changed —
 	// ansible-playbook's --diff. A module that supports it returns the
 	// before and after contents, which the callbacks render as a unified
@@ -299,6 +313,9 @@ func (e *Engine) runPlay(ctx context.Context, play Play) (*PlayResult, error) {
 
 	hosts, err := e.Inventory.Match(play.Hosts)
 	if err != nil {
+		return pr, fmt.Errorf("play %q: %w", play.Name, err)
+	}
+	if hosts, err = e.applyLimit(hosts); err != nil {
 		return pr, fmt.Errorf("play %q: %w", play.Name, err)
 	}
 
@@ -1680,4 +1697,31 @@ func (ec *execCtx) checkModeGate(task Task, args map[string]any) (skip bool, res
 		args[modules.CheckModeKey] = true
 	}
 	return false, modules.Result{}
+}
+
+// applyLimit intersects a play's matched hosts with Engine.Limit, which
+// is ansible-playbook's --limit. An empty limit is not a filter at all.
+//
+// The intersection is by NAME rather than by re-matching the play's
+// pattern, so a play whose hosts: is already narrower than the limit
+// keeps its own narrower set — the limit can only ever remove hosts.
+func (e *Engine) applyLimit(hosts []*inventory.Host) ([]*inventory.Host, error) {
+	if e.Limit == "" {
+		return hosts, nil
+	}
+	allowed, err := e.Inventory.Match(e.Limit)
+	if err != nil {
+		return nil, fmt.Errorf("--limit %q: %w", e.Limit, err)
+	}
+	keep := make(map[string]bool, len(allowed))
+	for _, h := range allowed {
+		keep[h.Name] = true
+	}
+	out := make([]*inventory.Host, 0, len(hosts))
+	for _, h := range hosts {
+		if keep[h.Name] {
+			out = append(out, h)
+		}
+	}
+	return out, nil
 }
