@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-ansible/inventory"
@@ -37,11 +38,16 @@ func TestRunOnceAlwaysPicksTheFirstHost(t *testing.T) {
 	// old code could pick the right host by luck.
 	for i := 0; i < 20; i++ {
 		e := New(fiveHostInventory())
+		// Serialised because OnResult arrives from one goroutine per host.
+		var mu sync.Mutex
 		var ranOn string
 		e.OnResult = func(r Result) {
-			if r.Task == "single" {
-				ranOn = r.Host
+			if r.Task != "single" {
+				return
 			}
+			mu.Lock()
+			defer mu.Unlock()
+			ranOn = r.Host
 		}
 		if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
 			t.Fatal(err)
