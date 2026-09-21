@@ -192,6 +192,12 @@ type Task struct {
 	// role at all.
 	RoleDir string
 
+	// NoLog hides this task's result. Real Ansible replaces the whole
+	// result with a single `censored` key, keeping only `changed`, so a
+	// task handling a credential cannot leak it through the callback —
+	// including when it FAILS, which is when a result is dumped in full.
+	NoLog bool
+
 	Block  []Task
 	Rescue []Task
 	Always []Task
@@ -331,6 +337,14 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 				p.Vars[k] = v
 			}
 		}
+	}
+
+	// A play-level environment: used to parse and then be IGNORED, so
+	// the command ran without the variable and nothing said so. Until
+	// this port can set a command's environment, refusing is the honest
+	// answer — see unhonouredTaskKeys.
+	if _, ok := m["environment"]; ok {
+		return p, errors.New("environment: is not supported yet; export the variable around ansible-playbook, or set it in the command itself")
 	}
 
 	var tasks []Task
@@ -475,6 +489,46 @@ var taskReservedKeys = map[string]bool{
 	"block": true, "rescue": true, "always": true, "with_items": true,
 	"until": true, "retries": true, "delay": true, "run_once": true,
 	"async": true, "poll": true,
+
+	// Honoured, and added here so it is not mistaken for a module name
+	// — which is what a key this parser does not know becomes.
+	"no_log": true,
+}
+
+// unhonouredTaskKeys are real Ansible task keywords this port PARSES but
+// does not act on. They are listed so a playbook using one gets an
+// error that names it, rather than the "ambiguous module" that any
+// unknown key used to produce — a key the parser does not know is
+// treated as the module name, so `no_log: true` beside `debug:` read as
+// two modules.
+//
+// They are rejected rather than ignored. Silently accepting
+// `connection: local` or `environment:` on a task would mean running
+// something OTHER than what the playbook says, which is worse than
+// refusing; the keyword list real Ansible exposes
+// (ansible.playbook.task.Task.fattributes, 42 entries) is the source of
+// this list.
+var unhonouredTaskKeys = map[string]string{
+	"action":             "write the module as its own key instead",
+	"args":               "pass module arguments under the module key",
+	"any_errors_fatal":   "",
+	"async_val":          "use async:",
+	"become_exe":         "",
+	"become_flags":       "",
+	"check_mode":         "use the --check flag, which this port honours",
+	"collections":        "fully-qualified module names resolve without it",
+	"connection":         "set ansible_connection on the host or group instead",
+	"debugger":           "",
+	"delegate_facts":     "",
+	"environment":        "this port does not set a command's environment yet; export the variable around ansible-playbook, or set it in the command itself",
+	"diff":               "use the --diff flag, which this port honours",
+	"ignore_unreachable": "",
+	"loop_with":          "use loop: or with_items:",
+	"module_defaults":    "",
+	"port":               "set ansible_port on the host or group instead",
+	"remote_user":        "set ansible_user on the host or group instead",
+	"throttle":           "use serial: on the play, which this port honours",
+	"timeout":            "",
 }
 
 // includeReservedKeys are the extra keys recognized on an
@@ -539,6 +593,7 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 		Until:        normalizeWhen(m["until"]),
 		Delay:        floatDefault(m["delay"], 5),
 		RunOnce:      boolDefault(m["run_once"], false),
+		NoLog:        boolDefault(m["no_log"], false),
 		Async:        toInt(m["async"]),
 	}
 	if v, ok := m["retries"]; ok {
@@ -609,6 +664,15 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 	for k := range m {
 		if taskReservedKeys[k] || includeReservedKeys[k] {
 			continue
+		}
+		// A real Ansible keyword this port does not honour is named as
+		// such. Without this it would be taken for the module.
+		if hint, known := unhonouredTaskKeys[k]; known {
+			msg := fmt.Sprintf("task %q: %q is a real Ansible task keyword that this port does not support yet", t.Name, k)
+			if hint != "" {
+				msg += " — " + hint
+			}
+			return t, errors.New(msg)
 		}
 		if moduleKey != "" {
 			return t, fmt.Errorf("task %q: ambiguous module: both %q and %q present", t.Name, moduleKey, k)

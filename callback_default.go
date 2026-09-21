@@ -222,6 +222,19 @@ func (c *DefaultCallback) OnStats(rr *RunResult) {
 // there even when empty, and an unreachable result carries
 // unreachable: true.
 func (c *DefaultCallback) resultJSON(r Result) string {
+	// A failing no_log task is where a credential would otherwise be
+	// dumped in full. Real Ansible replaces everything but `changed`
+	// with this one key, wording included.
+	if r.NoLog {
+		out, err := template.ToJSON(map[string]any{
+			"censored": "the output has been hidden due to the fact that 'no_log: true' was specified for this result",
+			"changed":  r.Changed,
+		}, 0)
+		if err != nil {
+			return "censored"
+		}
+		return out
+	}
 	fields := map[string]any{
 		"changed": r.Changed,
 		"msg":     r.Msg,
@@ -251,6 +264,10 @@ func (c *DefaultCallback) resultJSON(r Result) string {
 // Returns the empty string for every other result, which is why an
 // ordinary command still prints one bare line.
 func (c *DefaultCallback) verboseDump(r Result) string {
+	// no_log: the point of the task is that its result is not printed.
+	if r.NoLog {
+		return ""
+	}
 	if v, ok := r.Extra[verboseAlwaysKey].(bool); !ok || !v {
 		return ""
 	}
