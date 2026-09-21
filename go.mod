@@ -6,7 +6,7 @@ require (
 	github.com/go-ansible/facts v0.1.0
 	github.com/go-ansible/inventory v0.6.0
 	github.com/go-ansible/modules v0.49.0
-	github.com/go-ansible/template v0.17.0
+	github.com/go-ansible/template v0.18.0
 	github.com/go-ansible/vars v0.1.2
 	github.com/go-ansible/vault v0.4.0
 	github.com/go-remoteexec/transport v0.1.7

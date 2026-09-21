@@ -129,6 +129,17 @@ type Engine struct {
 	// have restarted it never ran.
 	ForceHandlers bool
 
+	// AllowBrokenConditionals permits a when:/until:/changed_when:
+	// whose result is not a boolean, applying ordinary truthiness
+	// instead of refusing — real Ansible's ALLOW_BROKEN_CONDITIONALS,
+	// which defaults to off there too and which upstream plans to
+	// remove in 2.23.
+	//
+	// A playbook that needs it is a playbook real ansible-core also
+	// refuses, so this exists to unblock a migration rather than to be
+	// left on.
+	AllowBrokenConditionals bool
+
 	// DiffMode makes modules report what they changed —
 	// ansible-playbook's --diff. A module that supports it returns the
 	// before and after contents, which the callbacks render as a unified
@@ -174,6 +185,8 @@ func New(inv *inventory.Inventory) *Engine {
 		BaseDir:   ".",
 		Forks:     envInt("ANSIBLE_FORKS", 5), // real Ansible's own default (DEFAULT_FORKS)
 		Prompt:    defaultPrompt,
+		// Real Ansible reads the same variable, and defaults to off.
+		AllowBrokenConditionals: envBool("ANSIBLE_ALLOW_BROKEN_CONDITIONALS", false),
 	}
 }
 
@@ -1926,7 +1939,47 @@ func stripConditionDelimiters(cond string) string {
 
 // evalWhen evaluates a when:/until:/changed_when:/failed_when:
 // expression, accepting the deprecated {{ }} wrapping real Ansible
-// still accepts.
+// still accepts, and REQUIRING a boolean result unless
+// Engine.AllowBrokenConditionals says otherwise.
+//
+// The boolean requirement is real ansible-core 2.21's, and the reason
+// it exists is worth restating: a conditional that is not a boolean is
+// usually a template used where one is not supported, and it then
+// reads as ALWAYS TRUE — so the task runs every time, silently. That is
+// an action difference, not a reporting one.
 func (ec *execCtx) evalWhen(cond string, data map[string]any) (bool, error) {
-	return ec.engine.Template.EvalBool(stripConditionDelimiters(cond), data)
+	expr := stripConditionDelimiters(cond)
+
+	value, err := ec.engine.Template.Eval(expr, data)
+	if err != nil {
+		return false, err
+	}
+	if b, ok := value.(bool); ok {
+		return b, nil
+	}
+
+	// Not a boolean. Real Ansible refuses by default and offers one
+	// temporary way out, which it plans to remove in 2.23.
+	truthy, err := ec.engine.Template.EvalBool(expr, data)
+	if err != nil {
+		return false, err
+	}
+	if !ec.engine.AllowBrokenConditionals {
+		// Real Ansible's own wording, minus the source position: this
+		// port does not track where a conditional was written.
+		return false, fmt.Errorf(
+			"Conditional result (%s) was derived from value of type %q. Conditionals must have a boolean result.\n"+
+				"Broken conditionals can be temporarily allowed with the ALLOW_BROKEN_CONDITIONALS configuration option.",
+			pythonBool(truthy), template.PythonTypeName(value))
+	}
+	return truthy, nil
+}
+
+// pythonBool renders a Go bool the way Python prints one, which is how
+// real Ansible words the conditional error.
+func pythonBool(b bool) string {
+	if b {
+		return "True"
+	}
+	return "False"
 }
