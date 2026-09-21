@@ -1160,6 +1160,9 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				if ec.engine.DiffMode && args != nil {
 					args[modules.DiffModeKey] = true
 				}
+				if env := ec.taskEnvironment(task, mergedVars); len(env) > 0 && args != nil {
+					args[modules.EnvironmentKey] = env
+				}
 				if skip, res := ec.checkModeGate(task, args); skip {
 					result = res
 				} else if task.Async > 0 {
@@ -1868,4 +1871,31 @@ func matchesStartAt(task Task, pattern string) bool {
 		}
 	}
 	return false
+}
+
+// taskEnvironment merges the play's environment: with the task's own —
+// the task wins on a key both set — and templates every value, which is
+// what makes `TMPL: "hello-{{ who }}"` work.
+//
+// Returns nil when neither sets anything, so a task with no environment
+// carries no wire flag at all.
+func (ec *execCtx) taskEnvironment(task Task, mergedVars map[string]any) map[string]any {
+	if len(ec.play.Environment) == 0 && len(task.Environment) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(ec.play.Environment)+len(task.Environment))
+	for _, layer := range []map[string]any{ec.play.Environment, task.Environment} {
+		for k, v := range layer {
+			// A value that fails to template is passed through as it
+			// was written: the command still runs, and an obviously
+			// wrong value in the environment is easier to see than a
+			// task that did not run at all.
+			rendered, err := ec.engine.Template.RenderValue(v, mergedVars)
+			if err != nil {
+				rendered = v
+			}
+			out[k] = rendered
+		}
+	}
+	return out
 }

@@ -69,7 +69,7 @@ func TestUnhonouredTaskKeywordsAreNamed(t *testing.T) {
 		"connection: local", "remote_user: x", "port: 22", "throttle: 2",
 		"check_mode: false", "diff: true", "collections: [a.b]",
 		"module_defaults: {}", "timeout: 30", "any_errors_fatal: true",
-		"environment: {A: b}", "ignore_unreachable: true", "delegate_facts: true",
+		"ignore_unreachable: true", "delegate_facts: true",
 		"debugger: never", "become_flags: -H", "become_exe: sudo",
 	} {
 		t.Run(kw, func(t *testing.T) {
@@ -88,25 +88,6 @@ func TestUnhonouredTaskKeywordsAreNamed(t *testing.T) {
 	}
 }
 
-// A play-level environment: used to parse and then be ignored, so the
-// command ran without the variable and nothing said so.
-func TestPlayEnvironmentIsRefusedRatherThanIgnored(t *testing.T) {
-	_, err := Parse([]byte(`
-- name: p
-  hosts: all
-  gather_facts: false
-  environment: {MY_PROBE: v}
-  tasks:
-    - {name: t, debug: {msg: x}}
-`))
-	if err == nil {
-		t.Fatal("a play-level environment: must be refused, not silently ignored")
-	}
-	if !strings.Contains(err.Error(), "environment") {
-		t.Errorf("error must name it: %v", err)
-	}
-}
-
 // no_log is a TASK keyword now, so it must not read as a module.
 func TestNoLogParsesAsAKeyword(t *testing.T) {
 	pb, err := Parse([]byte("- {name: p, hosts: all, gather_facts: false, tasks: [{name: t, debug: {msg: x}, no_log: true}]}\n"))
@@ -119,5 +100,64 @@ func TestNoLogParsesAsAKeyword(t *testing.T) {
 	}
 	if !task.NoLog {
 		t.Error("NoLog was not set")
+	}
+}
+
+// TestEnvironmentReachesTheCommand pins environment: against real
+// ansible-core 2.21.4: the play's entries apply, a task's are merged
+// over them, the task wins on a key both set, and values are templated.
+func TestEnvironmentReachesTheCommand(t *testing.T) {
+	out := runAndCapture(t, `
+- name: p
+  hosts: all
+  gather_facts: false
+  vars: {who: world}
+  environment:
+    PLAY_VAR: from-play
+    OVERRIDE: play-wins
+  tasks:
+    - name: play only
+      shell: 'echo "P=[${PLAY_VAR:-unset}] O=[${OVERRIDE:-unset}] T=[${TASK_VAR:-unset}]"'
+      register: a
+    - name: task adds and overrides
+      shell: 'echo "P=[${PLAY_VAR:-unset}] O=[${OVERRIDE:-unset}] T=[${TASK_VAR:-unset}]"'
+      register: b
+      environment: {TASK_VAR: from-task, OVERRIDE: task-wins}
+    - name: templated
+      shell: 'echo "V=[${TMPL:-unset}]"'
+      register: c
+      environment: {TMPL: "hello-{{ who }}"}
+    - name: show
+      debug:
+        msg: "a={{ a.stdout }} b={{ b.stdout }} c={{ c.stdout }}"
+`)
+	for _, want := range []string{
+		// The play's entries reach a task that sets none of its own.
+		"a=P=[from-play] O=[play-wins] T=[unset]",
+		// A task MERGES with the play rather than replacing it, and
+		// wins on a shared key.
+		"b=P=[from-play] O=[task-wins] T=[from-task]",
+		// Values are templated.
+		"c=V=[hello-world]",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// A task with no environment: anywhere carries no wire flag, so nothing
+// is prepended to its command.
+func TestNoEnvironmentMeansNoPrefix(t *testing.T) {
+	out := runAndCapture(t, `
+- name: p
+  hosts: all
+  gather_facts: false
+  tasks:
+    - {name: t, shell: 'echo "V=[${NOPE:-unset}]"', register: r}
+    - {name: show, debug: {msg: "{{ r.stdout }}"}}
+`)
+	if !strings.Contains(out, "V=[unset]") {
+		t.Errorf("expected an unset variable:\n%s", out)
 	}
 }
