@@ -35,6 +35,14 @@ type Result struct {
 	// callback renders them; nothing in the engine reads them.
 	Diffs []modules.Diff
 
+	// Item is the loop item this result is for, and Looped says the
+	// task looped at all — separate, because an item may legitimately
+	// be nil. Real Ansible prints the item on the result line, and
+	// counts a looped task ONCE in the recap however many iterations
+	// it ran.
+	Item   any
+	Looped bool
+
 	// NoLog marks a result whose task set no_log: true. A callback must
 	// print nothing from it beyond the outcome and the host: real
 	// Ansible replaces the whole result with a single `censored` key,
@@ -128,6 +136,42 @@ func (rr *RunResult) Failed() bool {
 	return false
 }
 
+// foldLoops collapses each looped task's iterations into one result
+// per host, leaving every other result untouched and in order.
+//
+// The folded state is what real Ansible reports: changed if ANY
+// iteration changed, failed if any failed, ignored if any was ignored,
+// and skipped only when EVERY iteration was skipped — a loop with one
+// item that ran and two that did not counts as ok, not skipped.
+func foldLoops(results []Result) []Result {
+	out := make([]Result, 0, len(results))
+	// Keyed by host and task name: folding two same-named tasks
+	// together is what real Ansible's own per-task counting does too.
+	index := map[[2]string]int{}
+
+	for _, r := range results {
+		if !r.Looped {
+			out = append(out, r)
+			continue
+		}
+		key := [2]string{r.Host, r.Task}
+		at, seen := index[key]
+		if !seen {
+			index[key] = len(out)
+			out = append(out, r)
+			continue
+		}
+		folded := &out[at]
+		folded.Changed = folded.Changed || r.Changed
+		folded.Failed = folded.Failed || r.Failed
+		folded.Ignored = folded.Ignored || r.Ignored
+		folded.Unreachable = folded.Unreachable || r.Unreachable
+		// Skipped survives only while every iteration so far skipped.
+		folded.Skipped = folded.Skipped && r.Skipped
+	}
+	return out
+}
+
 // Summary counts changed/failed/skipped/ok results across the whole
 // run, keyed by host — Ansible's PLAY RECAP.
 type HostSummary struct {
@@ -150,8 +194,12 @@ func (rr *RunResult) Summary() map[string]*HostSummary {
 		}
 		return s
 	}
+	// Real Ansible counts a LOOPED task once per host however many
+	// iterations it ran: a loop over three items that all changed
+	// reports changed=1, not 3. This port reported one entry per
+	// iteration, so a 100-item loop inflated the recap by a hundred.
 	for _, p := range rr.Plays {
-		for _, r := range p.Results {
+		for _, r := range foldLoops(p.Results) {
 			s := summaryFor(r.Host)
 			switch {
 			case r.Unreachable:

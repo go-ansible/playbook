@@ -134,11 +134,11 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 			fmt.Fprintln(c.w, c.colorize(colorCyan, "...ignoring"))
 		}
 	case r.Skipped:
-		fmt.Fprintln(c.w, c.colorize(colorCyan, fmt.Sprintf("skipping: [%s]", r.Host)))
+		fmt.Fprintln(c.w, c.colorize(colorCyan, fmt.Sprintf("skipping: [%s]%s", r.Host, itemLabel(r))))
 	case r.Changed:
-		fmt.Fprintln(c.w, c.colorize(colorYellow, fmt.Sprintf("changed: [%s]", hostLabel(r)))+c.verboseDump(r))
+		fmt.Fprintln(c.w, c.colorize(colorYellow, fmt.Sprintf("changed: [%s]%s", hostLabel(r), itemLabel(r)))+c.verboseDump(r))
 	default:
-		fmt.Fprintln(c.w, c.colorize(colorGreen, fmt.Sprintf("ok: [%s]", hostLabel(r)))+c.verboseDump(r))
+		fmt.Fprintln(c.w, c.colorize(colorGreen, fmt.Sprintf("ok: [%s]%s", hostLabel(r), itemLabel(r)))+c.verboseDump(r))
 	}
 }
 
@@ -303,4 +303,20 @@ func hostLabel(r Result) string {
 		return r.Host
 	}
 	return r.Host + " -> " + r.Delegate
+}
+
+// itemLabel is the " => (item=x)" real Ansible appends to a looped
+// task's result line, and the only thing that says which iteration a
+// line belongs to. Empty for a task that did not loop.
+//
+// A no_log task's item is censored rather than printed, since the item
+// is frequently the secret itself — real Ansible's own wording.
+func itemLabel(r Result) string {
+	if !r.Looped {
+		return ""
+	}
+	if r.NoLog {
+		return " => (item=(censored due to no_log))"
+	}
+	return fmt.Sprintf(" => (item=%v)", r.Item)
 }
