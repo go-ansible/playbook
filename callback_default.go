@@ -134,7 +134,7 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 			fmt.Fprintln(c.w, c.colorize(colorCyan, "...ignoring"))
 		}
 	case r.Skipped:
-		fmt.Fprintln(c.w, c.colorize(colorCyan, fmt.Sprintf("skipping: [%s]%s", r.Host, itemLabel(r))))
+		fmt.Fprintln(c.w, c.colorize(colorCyan, fmt.Sprintf("skipping: [%s]%s", r.Host, skippedItemLabel(r))))
 	case r.Changed:
 		fmt.Fprintln(c.w, c.colorize(colorYellow, fmt.Sprintf("changed: [%s]%s", hostLabel(r), itemLabel(r)))+c.verboseDump(r))
 	default:
@@ -319,4 +319,17 @@ func itemLabel(r Result) string {
 		return " => (item=(censored due to no_log))"
 	}
 	return fmt.Sprintf(" => (item=%v)", r.Item)
+}
+
+// skippedItemLabel is itemLabel plus the TRAILING SPACE real Ansible
+// leaves on a skipped iteration's line — "skipping: [h1] => (item=2) ",
+// where the same label on an ok or changed line has none. Measured with
+// od rather than inferred: it is a quirk of real Ansible's own format
+// string for that one case, and reproducing it is what makes a
+// transcript comparison come out byte-identical.
+func skippedItemLabel(r Result) string {
+	if label := itemLabel(r); label != "" {
+		return label + " "
+	}
+	return ""
 }

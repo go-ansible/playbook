@@ -150,3 +150,30 @@ func TestFoldLoopsKeepsOtherResults(t *testing.T) {
 		t.Errorf("h2's loop skipped entirely, got %+v", got[2])
 	}
 }
+
+// TestSkippedItemLineKeepsItsTrailingSpace pins a quirk of real
+// Ansible's own format string, measured with od: a SKIPPED iteration's
+// line ends "(item=2) " with a trailing space, where the same label on
+// an ok or changed line has none.
+//
+// Trivial on its own, and the last thing between this port and a
+// byte-identical transcript.
+func TestSkippedItemLineKeepsItsTrailingSpace(t *testing.T) {
+	out := runAndCapture(t, `
+- name: p
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: filter
+      command: "echo {{ item }}"
+      loop: [1, 2]
+      when: "item != 2"
+`)
+	if !strings.Contains(out, "skipping: [localhost] => (item=2) \n") {
+		t.Errorf("skipped item line must keep real Ansible's trailing space:\n%q", out)
+	}
+	// The changed line for the item that ran has NO trailing space.
+	if !strings.Contains(out, "changed: [localhost] => (item=1)\n") {
+		t.Errorf("a changed item line must have no trailing space:\n%q", out)
+	}
+}
