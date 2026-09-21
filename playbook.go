@@ -43,7 +43,11 @@ type Play struct {
 	// is normalised into a one-element list here too — `serial: 2` and
 	// `serial: [2]` are the same play.
 	Serial []string
-	Roles  []RoleRef
+
+	// Environment is added to the environment of every command the play
+	// runs. A task's own environment: is merged over it, key by key.
+	Environment map[string]any
+	Roles       []RoleRef
 
 	// Strategy is "linear" (the default: every host finishes task N
 	// before any host starts task N+1) or "free" (each host runs its
@@ -192,6 +196,11 @@ type Task struct {
 	// role at all.
 	RoleDir string
 
+	// Environment is added to the environment of the command this task
+	// runs, merged over its play's — the task's entry wins on a key
+	// both set.
+	Environment map[string]any
+
 	// NoLog hides this task's result. Real Ansible replaces the whole
 	// result with a single `censored` key, keeping only `changed`, so a
 	// task handling a credential cannot leak it through the callback —
@@ -314,6 +323,7 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 		Vars:         toMap(m["vars"]),
 		Tags:         toStringList(m["tags"]),
 		Serial:       toSerialList(m["serial"]),
+		Environment:  toMap(m["environment"]),
 	}
 	if p.Hosts == "" {
 		return p, fmt.Errorf("play %q: missing required field: hosts", p.Name)
@@ -337,14 +347,6 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 				p.Vars[k] = v
 			}
 		}
-	}
-
-	// A play-level environment: used to parse and then be IGNORED, so
-	// the command ran without the variable and nothing said so. Until
-	// this port can set a command's environment, refusing is the honest
-	// answer — see unhonouredTaskKeys.
-	if _, ok := m["environment"]; ok {
-		return p, errors.New("environment: is not supported yet; export the variable around ansible-playbook, or set it in the command itself")
 	}
 
 	var tasks []Task
@@ -490,9 +492,9 @@ var taskReservedKeys = map[string]bool{
 	"until": true, "retries": true, "delay": true, "run_once": true,
 	"async": true, "poll": true,
 
-	// Honoured, and added here so it is not mistaken for a module name
-	// — which is what a key this parser does not know becomes.
-	"no_log": true,
+	// Honoured, and added here so they are not mistaken for a module
+	// name — which is what a key this parser does not know becomes.
+	"no_log": true, "environment": true,
 }
 
 // unhonouredTaskKeys are real Ansible task keywords this port PARSES but
@@ -520,7 +522,6 @@ var unhonouredTaskKeys = map[string]string{
 	"connection":         "set ansible_connection on the host or group instead",
 	"debugger":           "",
 	"delegate_facts":     "",
-	"environment":        "this port does not set a command's environment yet; export the variable around ansible-playbook, or set it in the command itself",
 	"diff":               "use the --diff flag, which this port honours",
 	"ignore_unreachable": "",
 	"loop_with":          "use loop: or with_items:",
@@ -594,6 +595,7 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 		Delay:        floatDefault(m["delay"], 5),
 		RunOnce:      boolDefault(m["run_once"], false),
 		NoLog:        boolDefault(m["no_log"], false),
+		Environment:  toMap(m["environment"]),
 		Async:        toInt(m["async"]),
 	}
 	if v, ok := m["retries"]; ok {
