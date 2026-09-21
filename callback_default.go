@@ -151,10 +151,7 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 // then the outcome, and banner-on-first-result-only put the retries
 // above the banner instead.
 func (c *DefaultCallback) taskBanner(r Result) {
-	banner := r.Task
-	if banner == "" {
-		banner = r.Module
-	}
+	banner := DisplayName(r.Role, r.Task, r.Module)
 	// Real Ansible banners a handler run differently, which is how a
 	// reader tells it from an ordinary task of the same name.
 	kind := "TASK"
@@ -179,11 +176,8 @@ func (c *DefaultCallback) OnTaskRetry(r Result, left int) {
 
 	c.taskBanner(r)
 
-	name := r.Task
-	if name == "" {
-		name = r.Module
-	}
-	line := fmt.Sprintf("FAILED - RETRYING: [%s]: %s (%d retries left).", hostLabel(r), name, left)
+	line := fmt.Sprintf("FAILED - RETRYING: [%s]: %s (%d retries left).",
+		hostLabel(r), DisplayName(r.Role, r.Task, r.Module), left)
 	fmt.Fprintln(c.w, c.colorize(colorDarkGray, line))
 }
 

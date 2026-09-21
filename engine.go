@@ -1273,6 +1273,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			Diffs:    result.Diffs,
 			Delegate: delegate,
 			Handler:  isHandler,
+			Role:     roleName(task),
 		})
 
 		// set_fact's/include_vars' variables are accessible by their

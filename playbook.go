@@ -1140,3 +1140,30 @@ func (p Play) ListedTasks() []Task {
 	walk(p.Tasks)
 	return out
 }
+
+// DisplayName is the name Ansible shows for a task, in a run-time
+// banner and in --list-tasks alike: the task's own name, or its module
+// when it has none, prefixed with the role it came from —
+// "myrole : the task", with spaces around the colon.
+//
+// Exported because the banner and the listing must agree: a
+// --list-tasks that named tasks differently from the run it describes
+// would be worse than none.
+func DisplayName(role, name, module string) string {
+	if name == "" {
+		name = module
+	}
+	if role == "" {
+		return name
+	}
+	return role + " : " + name
+}
+
+// roleName is the role a task came from, derived from the directory
+// stamped on it at parse time.
+func roleName(t Task) string {
+	if t.RoleDir == "" {
+		return ""
+	}
+	return filepath.Base(t.RoleDir)
+}
