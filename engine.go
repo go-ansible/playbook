@@ -1725,3 +1725,18 @@ func (e *Engine) applyLimit(hosts []*inventory.Host) ([]*inventory.Host, error) 
 	}
 	return out, nil
 }
+
+// TagsSelect reports whether a task carrying these effective tags is
+// selected by the given --tags and --skip-tags lists. It is the same
+// rule the engine applies when deciding what to run, exported because
+// ansible-playbook's --list-tasks and --list-tags must show exactly
+// what a run would do — answering that question twice, in two places,
+// is how the two drift apart.
+//
+// effective is a task's tags AFTER its play's and blocks' have been
+// pushed down, which is what Parse already stores on Task.Tags. An
+// empty run list means "all", which is what excludes a task tagged
+// never; see tagsMatch for the full algorithm and where it comes from.
+func TagsSelect(effective, run, skip []string) bool {
+	return tagsMatch(effective, run, skip)
+}

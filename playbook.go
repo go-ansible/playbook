@@ -1111,3 +1111,32 @@ func readMaybeEncrypted(path, vaultPassword string) ([]byte, error) {
 	}
 	return plain, nil
 }
+
+// ListedTasks returns the tasks ansible-playbook's --list-tasks shows
+// for this play, in order: every task that runs a module, descending
+// into a block's block: but NOT into its rescue: or always:.
+//
+// That asymmetry is real Ansible's own, measured rather than assumed —
+// a block's rescue and always tasks do not appear in the listing even
+// though they are part of the play and will run. Role tasks DO appear,
+// because a play's roles: are expanded into its task list at parse
+// time; Task.RoleDir names the role each came from.
+//
+// Tags on the returned tasks are already the EFFECTIVE ones, since
+// parsing pushes a play's and a block's tags down into the tasks they
+// contain.
+func (p Play) ListedTasks() []Task {
+	var out []Task
+	var walk func([]Task)
+	walk = func(tasks []Task) {
+		for _, t := range tasks {
+			if t.IsBlock() {
+				walk(t.Block)
+				continue
+			}
+			out = append(out, t)
+		}
+	}
+	walk(p.Tasks)
+	return out
+}
