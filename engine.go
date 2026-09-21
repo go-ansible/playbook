@@ -591,7 +591,7 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 		var passed []string
 		for _, h := range active {
 			st := ec.states[h]
-			ok, err := ec.engine.Template.EvalBool(task.When, st.vc.Merged())
+			ok, err := ec.evalWhen(task.When, st.vc.Merged())
 			if err != nil {
 				ec.report(pr, Result{Host: h, Task: task.Name, Failed: true, Msg: "when: " + err.Error()})
 				continue
@@ -1023,7 +1023,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 	// whole task where real runs the first. A playbook that says to
 	// skip an item acted on it anyway.
 	if task.When != "" && task.Loop == nil {
-		ok, err := ec.engine.Template.EvalBool(task.When, scope.Merged())
+		ok, err := ec.evalWhen(task.When, scope.Merged())
 		if err != nil {
 			ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: "when: " + err.Error()})
 			return !task.IgnoreErrors
@@ -1076,7 +1076,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			// Now that `item` is bound, the condition can be asked
 			// about THIS item.
 			if task.When != "" {
-				ok, werr := ec.engine.Template.EvalBool(task.When, iter.Merged())
+				ok, werr := ec.evalWhen(task.When, iter.Merged())
 				if werr != nil {
 					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: "when: " + werr.Error(), Item: item, Looped: true})
 					anyFailed = true
@@ -1178,12 +1178,12 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 
 			resultView := resultToMap(result)
 			if task.ChangedWhen != "" {
-				if ok, cerr := ec.engine.Template.EvalBool(task.ChangedWhen, withResult(mergedVars, resultView)); cerr == nil {
+				if ok, cerr := ec.evalWhen(task.ChangedWhen, withResult(mergedVars, resultView)); cerr == nil {
 					result.Changed = ok
 				}
 			}
 			if task.FailedWhen != "" {
-				if ok, ferr := ec.engine.Template.EvalBool(task.FailedWhen, withResult(mergedVars, resultView)); ferr == nil {
+				if ok, ferr := ec.evalWhen(task.FailedWhen, withResult(mergedVars, resultView)); ferr == nil {
 					result.Failed = ok
 				}
 			}
@@ -1213,7 +1213,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			cond := task.Until
 			passed := !result.Failed
 			if cond != "" {
-				if ok, uerr := ec.engine.Template.EvalBool(cond, withResult(mergedVars, attemptView)); uerr == nil {
+				if ok, uerr := ec.evalWhen(cond, withResult(mergedVars, attemptView)); uerr == nil {
 					passed = ok
 				} else {
 					passed = false
@@ -1539,7 +1539,7 @@ func (ec *execCtx) evalCondition(cond any, vars map[string]any) (bool, error) {
 	case bool:
 		return c, nil
 	case string:
-		return ec.engine.Template.EvalBool(c, vars)
+		return ec.evalWhen(c, vars)
 	default:
 		return false, fmt.Errorf("condition %v is neither a boolean nor an expression (got %T)", cond, cond)
 	}
@@ -1898,4 +1898,35 @@ func (ec *execCtx) taskEnvironment(task Task, mergedVars map[string]any) map[str
 		}
 	}
 	return out
+}
+
+// stripConditionDelimiters removes the {{ }} a conditional is sometimes
+// written with. Real ansible-core accepts `when: "{{ flag }}"` and
+// warns that it is deprecated ("Conditionals should not be surrounded
+// by templating delimiters... will be removed from ansible-core version
+// 2.23"); this port FAILED the task instead, because every conditional
+// is evaluated by wrapping it in {{ }} — so one already wrapped became
+// `{{ {{ flag }} }}`, a syntax error.
+//
+// Only a conditional that is ENTIRELY one expression is unwrapped:
+// `{{ a }} and {{ b }}` is left alone, since removing the outer pair
+// would not produce a valid expression either way.
+func stripConditionDelimiters(cond string) string {
+	t := strings.TrimSpace(cond)
+	if !strings.HasPrefix(t, "{{") || !strings.HasSuffix(t, "}}") {
+		return cond
+	}
+	inner := t[2 : len(t)-2]
+	// A second block means this is not a single wrapped expression.
+	if strings.Contains(inner, "{{") || strings.Contains(inner, "}}") {
+		return cond
+	}
+	return strings.TrimSpace(inner)
+}
+
+// evalWhen evaluates a when:/until:/changed_when:/failed_when:
+// expression, accepting the deprecated {{ }} wrapping real Ansible
+// still accepts.
+func (ec *execCtx) evalWhen(cond string, data map[string]any) (bool, error) {
+	return ec.engine.Template.EvalBool(stripConditionDelimiters(cond), data)
 }
