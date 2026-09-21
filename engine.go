@@ -730,7 +730,11 @@ func mergeOnto(base, overlay map[string]any) map[string]any {
 // Play.Handlers untouched, but that alone doesn't stop an empty tag set
 // from being excluded whenever RunTags is non-empty, so runHandlers
 // must skip the check entirely).
+// filtered is false for handlers, which are exempt from --tags and
+// --start-at-task (they run because something notified them) and are
+// bannered differently.
 func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string, pr *PlayResult, filtered bool) []string {
+	isHandler := !filtered
 	// A task excluded by tags produces NO result at all — no banner, no
 	// "skipping:" line, and nothing in the recap. Measured: real
 	// ansible-core running this port's own tag playbook with
@@ -774,7 +778,7 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 			release := ec.acquire()
 			defer release()
 			st := ec.states[h]
-			failed := ec.runTaskOnHost(ctx, task, st, pr)
+			failed := ec.runTaskOnHost(ctx, task, st, pr, isHandler)
 			mu.Lock()
 			if failed {
 				st.failed = true
@@ -1003,7 +1007,7 @@ func (ec *execCtx) runAsyncTask(ctx context.Context, task Task, conn remoteexec.
 // runTaskOnHost runs task on one host (once per loop item, if looping)
 // and reports whether the host should be excluded from the rest of the
 // play (a failure not covered by ignore_errors).
-func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, pr *PlayResult) bool {
+func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, pr *PlayResult, isHandler bool) bool {
 	scope := st.vc.Child()
 	scope.Set(vars.TaskVars, task.Vars)
 
@@ -1105,7 +1109,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 
 			var handled bool
 			var derr error
-			result, handled, derr = ec.runDirective(ctx, task, st, args, pr)
+			result, handled, derr = ec.runDirective(ctx, task, st, args, mergedVars, pr)
 			if derr != nil {
 				ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: derr.Error()})
 				anyFailed = true
@@ -1268,6 +1272,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			Msg:     result.Msg, Extra: result.Extra,
 			Diffs:    result.Diffs,
 			Delegate: delegate,
+			Handler:  isHandler,
 		})
 
 		// set_fact's/include_vars' variables are accessible by their
@@ -1384,7 +1389,7 @@ func (ec *execCtx) connectionFor(ctx context.Context, task Task, mergedVars map[
 // just talking to a Connection. handled reports whether task.Module
 // named one of these — when false, the caller falls through to the
 // ordinary module dispatch.
-func (ec *execCtx) runDirective(ctx context.Context, task Task, st *hostState, args map[string]any, pr *PlayResult) (result modules.Result, handled bool, err error) {
+func (ec *execCtx) runDirective(ctx context.Context, task Task, st *hostState, args map[string]any, mergedVars map[string]any, pr *PlayResult) (result modules.Result, handled bool, err error) {
 	switch task.Module {
 	case "meta":
 		r, e := ec.runMeta(ctx, args, st, pr)
@@ -1410,7 +1415,7 @@ func (ec *execCtx) runDirective(ctx context.Context, task Task, st *hostState, a
 		if !ok {
 			return modules.Result{}, false, nil
 		}
-		return ec.runDebugVar(name, st), true, nil
+		return ec.runDebugVar(name, mergedVars), true, nil
 	default:
 		return modules.Result{}, false, nil
 	}
@@ -1425,18 +1430,27 @@ func (ec *execCtx) runDirective(ctx context.Context, task Task, st *hostState, a
 // A name that resolves to nothing reports real Ansible's own
 // "VARIABLE IS NOT DEFINED!" rather than an empty value, so a typo in a
 // debug task looks like a typo.
-func (ec *execCtx) runDebugVar(name string, st *hostState) modules.Result {
-	merged := st.vc.Merged()
+func (ec *execCtx) runDebugVar(name string, merged map[string]any) modules.Result {
 	value, ok := merged[name]
 	if !ok {
 		// The name may be an expression rather than a bare variable
 		// ("ansible_facts.os_family"), which real Ansible also accepts.
-		if v, err := ec.engine.Template.Eval(name, merged); err == nil {
+		//
+		// A nil result counts as UNDEFINED: the template engine returns
+		// no error for a name it cannot resolve, so without this every
+		// undefined variable printed as null instead of saying so. The
+		// narrow cost is that an expression resolving to a genuine null
+		// reads as undefined too; a bare name set to null is unaffected,
+		// because the lookup above finds it first.
+		if v, err := ec.engine.Template.Eval(name, merged); err == nil && v != nil {
 			value, ok = v, true
 		}
 	}
 	if !ok {
-		value = "VARIABLE IS NOT DEFINED!"
+		// Real ansible-core 2.21's own wording, measured — the leading
+		// "1" is a fixed per-result error index, not a counter: three
+		// undefined variables across two hosts all report error 1.
+		value = fmt.Sprintf("<< error 1 - '%s' is undefined >>", name)
 	}
 	return modules.Result{Extra: map[string]any{name: value}}.
 		WithExtra(verboseAlwaysKey, true)
@@ -1514,7 +1528,10 @@ func (ec *execCtx) runMeta(ctx context.Context, args map[string]any, st *hostSta
 	case "flush_handlers":
 		for _, handler := range ec.play.Handlers {
 			if st.notify[handler.Name] {
-				ec.runTaskOnHost(ctx, handler, st, pr)
+				// A handler, however it was reached — meta:
+				// flush_handlers banners it the same way the end-of-play
+				// run does.
+				ec.runTaskOnHost(ctx, handler, st, pr, true)
 			}
 		}
 		st.notify = map[string]bool{}

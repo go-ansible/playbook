@@ -35,6 +35,13 @@ type Result struct {
 	// callback renders them; nothing in the engine reads them.
 	Diffs []modules.Diff
 
+	// Handler marks a result produced by a handler rather than an
+	// ordinary task. Real Ansible banners those differently —
+	// "RUNNING HANDLER [restart nginx]" rather than "TASK [...]" — which
+	// is how a reader tells a handler run from a task that happens to
+	// share its name.
+	Handler bool
+
 	// Delegate is the host a delegate_to task actually ran against,
 	// already templated. Empty when the task ran on Host itself — and
 	// also empty for a task that was skipped, since a skipped task

@@ -155,9 +155,17 @@ func (c *DefaultCallback) taskBanner(r Result) {
 	if banner == "" {
 		banner = r.Module
 	}
-	if banner != c.lastTask {
-		fmt.Fprintf(c.w, "\n%s\n", c.colorize(colorCyan, "TASK ["+banner+"]"))
-		c.lastTask = banner
+	// Real Ansible banners a handler run differently, which is how a
+	// reader tells it from an ordinary task of the same name.
+	kind := "TASK"
+	if r.Handler {
+		kind = "RUNNING HANDLER"
+	}
+	// The kind is part of the identity: a handler that shares a task's
+	// name still gets its own banner.
+	if key := kind + " [" + banner + "]"; key != c.lastTask {
+		fmt.Fprintf(c.w, "\n%s\n", c.colorize(colorCyan, key))
+		c.lastTask = key
 	}
 }
 
