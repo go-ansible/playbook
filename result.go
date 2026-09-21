@@ -35,6 +35,11 @@ type Result struct {
 	// callback renders them; nothing in the engine reads them.
 	Diffs []modules.Diff
 
+	// Role is the name of the role this task came from, empty for a
+	// task written directly in a playbook. Real Ansible banners such a
+	// task "TASK [myrole : the task]"; see DisplayName.
+	Role string
+
 	// Handler marks a result produced by a handler rather than an
 	// ordinary task. Real Ansible banners those differently —
 	// "RUNNING HANDLER [restart nginx]" rather than "TASK [...]" — which

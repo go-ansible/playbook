@@ -3,6 +3,8 @@ package playbook
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -96,4 +98,56 @@ func runAndCapture(t *testing.T, src string) string {
 		t.Fatal(err)
 	}
 	return buf.String()
+}
+
+// TestRoleTaskBanner pins real Ansible's "TASK [r1 : role-task]" — the
+// SAME name --list-tasks shows, which is why both go through
+// DisplayName rather than each forming it.
+func TestRoleTaskBanner(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "roles", "r1", "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "roles", "r1", "tasks", "main.yml"),
+		[]byte("- {name: role-task, debug: {msg: r}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pbPath := filepath.Join(dir, "site.yml")
+	if err := os.WriteFile(pbPath,
+		[]byte("- {name: p, hosts: all, gather_facts: false, roles: [r1], tasks: [{name: plain, debug: {msg: x}}]}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pb, err := ParseFile(pbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	e := New(localhostInventory())
+	e.BaseDir = dir
+	e.Callbacks = []Callback{NewDefaultCallback(&buf, false)}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "TASK [r1 : role-task]") {
+		t.Errorf("a role task is bannered `r1 : role-task`:\n%s", out)
+	}
+	if !strings.Contains(out, "TASK [plain]") {
+		t.Errorf("a playbook task keeps its bare name:\n%s", out)
+	}
+}
+
+func TestDisplayName(t *testing.T) {
+	tests := []struct{ role, name, module, want string }{
+		{"", "the task", "debug", "the task"},
+		{"", "", "debug", "debug"},
+		{"r1", "the task", "debug", "r1 : the task"},
+		{"r1", "", "debug", "r1 : debug"},
+	}
+	for _, tt := range tests {
+		if got := DisplayName(tt.role, tt.name, tt.module); got != tt.want {
+			t.Errorf("DisplayName(%q,%q,%q) = %q, want %q", tt.role, tt.name, tt.module, got, tt.want)
+		}
+	}
 }
