@@ -35,6 +35,16 @@ type Result struct {
 	// callback renders them; nothing in the engine reads them.
 	Diffs []modules.Diff
 
+	// NoLog marks a result whose task set no_log: true. A callback must
+	// print nothing from it beyond the outcome and the host: real
+	// Ansible replaces the whole result with a single `censored` key,
+	// keeping only `changed`.
+	//
+	// It matters most on FAILURE, which is exactly when a result is
+	// dumped in full — a task handling a credential would otherwise
+	// leak it at the worst moment.
+	NoLog bool
+
 	// Role is the name of the role this task came from, empty for a
 	// task written directly in a playbook. Real Ansible banners such a
 	// task "TASK [myrole : the task]"; see DisplayName.
