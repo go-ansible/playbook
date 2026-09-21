@@ -330,8 +330,10 @@ func TestParseVarsAndSerial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pb[0].Serial != 2 {
-		t.Fatalf("Serial = %d", pb[0].Serial)
+	// A YAML scalar normalises into a one-element list, as real
+	// Ansible's own list-typed serial attribute does.
+	if len(pb[0].Serial) != 1 || pb[0].Serial[0] != "2" {
+		t.Fatalf("Serial = %q", pb[0].Serial)
 	}
 	if pb[0].Vars["x"] != 1 {
 		t.Fatalf("play Vars = %v", pb[0].Vars)

@@ -11,6 +11,7 @@ import (
 	"github.com/go-ansible/vault"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/go-ansible/modules"
@@ -32,8 +33,17 @@ type Play struct {
 	Tasks        []Task
 	Handlers     []Task
 	Tags         []string
-	Serial       int // 0 means "all hosts at once" (linear strategy default)
-	Roles        []RoleRef
+	// Serial is the rolling-update batch sizes. Each entry is either a
+	// plain count ("2") or a percentage of the play's TOTAL host count
+	// ("50%"); a list gives successive batch sizes, whose last entry
+	// repeats until every host has run. Empty means "all hosts at
+	// once", the linear strategy's default.
+	//
+	// Real Ansible's own `serial` is a list attribute, so a YAML scalar
+	// is normalised into a one-element list here too — `serial: 2` and
+	// `serial: [2]` are the same play.
+	Serial []string
+	Roles  []RoleRef
 
 	// Strategy is "linear" (the default: every host finishes task N
 	// before any host starts task N+1) or "free" (each host runs its
@@ -297,7 +307,7 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 		BecomeMethod: strDefault(m["become_method"], "sudo"),
 		Vars:         toMap(m["vars"]),
 		Tags:         toStringList(m["tags"]),
-		Serial:       toInt(m["serial"]),
+		Serial:       toSerialList(m["serial"]),
 	}
 	if p.Hosts == "" {
 		return p, fmt.Errorf("play %q: missing required field: hosts", p.Name)
@@ -1013,6 +1023,43 @@ func floatDefault(v any, def float64) float64 {
 		return float64(n)
 	}
 	return def
+}
+
+// toSerialList normalises a serial: value into the list real Ansible
+// keeps internally. A scalar becomes a one-element list, and every
+// entry is kept as TEXT because an entry may be either a count or a
+// percentage — "50%" has no integer form to coerce to.
+func toSerialList(v any) []string {
+	if v == nil {
+		return nil
+	}
+	if items, ok := v.([]any); ok {
+		out := make([]string, 0, len(items))
+		for _, it := range items {
+			if s := serialEntry(it); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	if s := serialEntry(v); s != "" {
+		return []string{s}
+	}
+	return nil
+}
+
+func serialEntry(v any) string {
+	switch n := v.(type) {
+	case string:
+		return strings.TrimSpace(n)
+	case int:
+		return strconv.Itoa(n)
+	case int64:
+		return strconv.FormatInt(n, 10)
+	case float64:
+		return strconv.Itoa(int(n))
+	}
+	return ""
 }
 
 func toInt(v any) int {

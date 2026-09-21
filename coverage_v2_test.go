@@ -92,7 +92,7 @@ func TestBatchHostsSerialEqualsHostCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	batches := batchHosts(matched, 3)
+	batches := batchHosts(matched, []string{"3"})
 	if len(batches) != 1 {
 		t.Fatalf("batches = %d, want 1 when serial == host count", len(batches))
 	}
@@ -104,7 +104,7 @@ func TestBatchHostsSerialLargerThanHostCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	batches := batchHosts(matched, 100)
+	batches := batchHosts(matched, []string{"100"})
 	if len(batches) != 1 {
 		t.Fatalf("batches = %d, want 1 when serial exceeds host count", len(batches))
 	}
@@ -116,7 +116,7 @@ func TestBatchHostsUnevenSplit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	batches := batchHosts(matched, 2)
+	batches := batchHosts(matched, []string{"2"})
 	if len(batches) != 2 || len(batches[0]) != 2 || len(batches[1]) != 1 {
 		t.Fatalf("batches = %v", batches)
 	}
