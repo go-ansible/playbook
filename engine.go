@@ -1011,7 +1011,18 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 	scope := st.vc.Child()
 	scope.Set(vars.TaskVars, task.Vars)
 
-	if task.When != "" {
+	// A task that does NOT loop evaluates its when: once, here. A
+	// looping one evaluates it PER ITEM instead (below), because the
+	// condition normally mentions `item` — and `item` does not exist
+	// yet at this point.
+	//
+	// Evaluating it here for a looping task was wrong in both
+	// directions, measured against real ansible-core:
+	// `when: "item != 2"` ran every iteration (undefined != 2 is true)
+	// where real skips the second, and `when: "item == 1"` skipped the
+	// whole task where real runs the first. A playbook that says to
+	// skip an item acted on it anyway.
+	if task.When != "" && task.Loop == nil {
 		ok, err := ec.engine.Template.EvalBool(task.When, scope.Merged())
 		if err != nil {
 			ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: "when: " + err.Error()})
@@ -1060,6 +1071,24 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			if task.IndexVar != "" {
 				// loop_control.index_var, 0-based as in real Ansible.
 				iter.SetVar(vars.TaskVars, task.IndexVar, index)
+			}
+
+			// Now that `item` is bound, the condition can be asked
+			// about THIS item.
+			if task.When != "" {
+				ok, werr := ec.engine.Template.EvalBool(task.When, iter.Merged())
+				if werr != nil {
+					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: "when: " + werr.Error(), Item: item, Looped: true})
+					anyFailed = true
+					if !task.IgnoreErrors {
+						break
+					}
+					continue
+				}
+				if !ok {
+					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Skipped: true, Item: item, Looped: true})
+					continue
+				}
 			}
 		}
 
@@ -1275,6 +1304,8 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			Handler:  isHandler,
 			Role:     roleName(task),
 			NoLog:    task.NoLog,
+			Item:     item,
+			Looped:   looping,
 		})
 
 		// set_fact's/include_vars' variables are accessible by their
