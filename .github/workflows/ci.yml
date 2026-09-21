@@ -36,7 +36,22 @@ jobs:
       - run: go version
       - run: go vet ./...
       - run: go build ./...
+      # ansible-core is the REFERENCE this port is measured against, and the
+      # only thing that can say whether a drop-in replacement is drop-in. The
+      # interop tests here have never run: the helper skipped, and no lane
+      # installed it.
+      #
+      # 2.21.4 is the version this repository's measurements were taken
+      # against (comments in the source name it), so the judge is pinned to it
+      # rather than to whatever is newest. A conformance oracle that moves on
+      # its own is not an oracle.
+      - name: ansible-core, the reference this port must match
+        run: pipx install ansible-core==2.21.4
+
       - name: Test
+        env:
+          # A skip here would look exactly like a pass.
+          ANSIBLE_REQUIRE: "1"
         run: go test ./...
 
   arch-native:
