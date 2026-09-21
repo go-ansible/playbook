@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -94,6 +95,39 @@ type Engine struct {
 	// That is why a play whose own hosts: matches nothing is not an
 	// error while a --limit matching nothing is.
 	Limit string
+
+	// StartAtTask skips every task until one whose NAME matches, then
+	// runs from there on — ansible-playbook's --start-at-task. The
+	// match is exact OR a shell glob (real Ansible uses fnmatch) and is
+	// case-sensitive, so "two" and "tw*" and "*wo" all find a task
+	// named two while "tw" and "TWO" do not. It is tried against a
+	// task's own name and against the "role : name" form a role task
+	// displays, both of which real Ansible tries.
+	//
+	// Once a task has matched, the skipping stops for the REST OF THE
+	// RUN — across later plays, and across later playbooks run through
+	// the same Engine. That is what makes --start-at-task resume a
+	// multi-play run at a point rather than re-skipping inside every
+	// play.
+	//
+	// A skipped task produces no result at all: no banner, no
+	// "skipping:" line, nothing in the recap, exactly as a task
+	// excluded by tags does.
+	StartAtTask string
+
+	// startAtDone records that StartAtTask has been reached. It is
+	// guarded because strategy: free runs a whole task list per host
+	// concurrently (see runFree), so several hosts can reach the
+	// matching task at once.
+	startAtMu   sync.Mutex
+	startAtDone bool
+
+	// ForceHandlers runs a host's notified handlers even when that host
+	// has already failed — ansible-playbook's --force-handlers.
+	// Normally a failed host runs nothing further, handlers included,
+	// which can leave a service stopped because the handler that would
+	// have restarted it never ran.
+	ForceHandlers bool
 
 	// DiffMode makes modules report what they changed —
 	// ansible-playbook's --diff. A module that supports it returns the
@@ -696,7 +730,7 @@ func mergeOnto(base, overlay map[string]any) map[string]any {
 // Play.Handlers untouched, but that alone doesn't stop an empty tag set
 // from being excluded whenever RunTags is non-empty, so runHandlers
 // must skip the check entirely).
-func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string, pr *PlayResult, filterTags bool) []string {
+func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string, pr *PlayResult, filtered bool) []string {
 	// A task excluded by tags produces NO result at all — no banner, no
 	// "skipping:" line, and nothing in the recap. Measured: real
 	// ansible-core running this port's own tag playbook with
@@ -708,7 +742,12 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 	// decide which tasks are in the play at all, whereas when: skips a
 	// task that is. Reporting the first as the second also made the
 	// recap's own skipped count wrong.
-	if filterTags && !tagsMatch(task.Tags, ec.engine.RunTags, ec.engine.SkipTags) {
+	if filtered && !tagsMatch(task.Tags, ec.engine.RunTags, ec.engine.SkipTags) {
+		return active
+	}
+	// --start-at-task, applied after the tag filter so a task excluded
+	// by tags cannot be the one that starts the run.
+	if filtered && !ec.engine.startAtReached(task) {
 		return active
 	}
 
@@ -1575,7 +1614,7 @@ func (ec *execCtx) runHandlers(ctx context.Context, order []string, pr *PlayResu
 		var toRun []string
 		for _, h := range order {
 			st := ec.states[h]
-			if !st.failed && st.notify[handler.Name] {
+			if (!st.failed || ec.engine.ForceHandlers) && st.notify[handler.Name] {
 				toRun = append(toRun, h)
 			}
 		}
@@ -1739,4 +1778,44 @@ func (e *Engine) applyLimit(hosts []*inventory.Host) ([]*inventory.Host, error) 
 // never; see tagsMatch for the full algorithm and where it comes from.
 func TagsSelect(effective, run, skip []string) bool {
 	return tagsMatch(effective, run, skip)
+}
+
+// startAtReached reports whether the run has reached Engine.StartAtTask
+// yet — true for every task once it has, and true always when no
+// --start-at-task was given.
+func (e *Engine) startAtReached(task Task) bool {
+	if e.StartAtTask == "" {
+		return true
+	}
+	e.startAtMu.Lock()
+	defer e.startAtMu.Unlock()
+	if e.startAtDone {
+		return true
+	}
+	if matchesStartAt(task, e.StartAtTask) {
+		e.startAtDone = true
+		return true
+	}
+	return false
+}
+
+// matchesStartAt is real Ansible's own test (play_iterator.py): the
+// pattern matches a task's name exactly, or as a glob — and both the
+// bare name and the "role : name" form a role task displays are tried.
+func matchesStartAt(task Task, pattern string) bool {
+	names := []string{task.Name}
+	if task.RoleDir != "" && task.Name != "" {
+		names = append(names, filepath.Base(task.RoleDir)+" : "+task.Name)
+	}
+	for _, name := range names {
+		if name == pattern {
+			return true
+		}
+		// A malformed pattern simply does not match, rather than
+		// failing the run.
+		if ok, err := path.Match(pattern, name); err == nil && ok {
+			return true
+		}
+	}
+	return false
 }
