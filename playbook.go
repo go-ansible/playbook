@@ -48,6 +48,16 @@ type Play struct {
 	// runs. A task's own environment: is merged over it, key by key.
 	Environment map[string]any
 
+	// ModuleDefaults are per-module argument defaults, keyed by module
+	// name: every task in the play that runs that module gets them
+	// underneath its own arguments. A task or block may set its own,
+	// which REPLACES the play's entry for that module outright rather
+	// than merging key by key — measured against real ansible-core
+	// 2.21.4, where a play-level `copy: {mode, content}` plus a
+	// task-level `copy: {mode}` loses the content and the task fails
+	// "src (or content) is required".
+	ModuleDefaults map[string]map[string]any
+
 	// Order is how the play's hosts are sequenced: "inventory" (the
 	// default), "sorted", "reverse_sorted", "reverse_inventory" or
 	// "shuffle".
@@ -230,6 +240,12 @@ type Task struct {
 	// both set.
 	Environment map[string]any
 
+	// ModuleDefaults is this task's EFFECTIVE set of per-module
+	// argument defaults — its own, over any enclosing block's, over
+	// the play's, resolved once at parse time by
+	// propagateModuleDefaults. Applying it is argsWithDefaults's job.
+	ModuleDefaults map[string]map[string]any
+
 	// CheckMode forces this task into (or out of) a dry run. Setting it
 	// FALSE is the useful case: real Ansible runs such a task for real
 	// even under --check, which is how a playbook reads state it needs
@@ -349,6 +365,7 @@ var playReservedKeys = map[string]bool{
 	"become_user": true, "become_method": true, "vars": true, "vars_files": true,
 	"tasks": true, "handlers": true, "roles": true, "tags": true, "serial": true,
 	"strategy": true, "pre_tasks": true, "post_tasks": true, "vars_prompt": true,
+	"module_defaults": true,
 }
 
 func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
@@ -373,6 +390,10 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 	}
 	if p.Hosts == "" {
 		return p, fmt.Errorf("play %q: missing required field: hosts", p.Name)
+	}
+	var mdErr error
+	if p.ModuleDefaults, mdErr = toModuleDefaults(m["module_defaults"]); mdErr != nil {
+		return p, fmt.Errorf("play %q: module_defaults: %w", p.Name, mdErr)
 	}
 	p.Strategy = strDefault(m["strategy"], "linear")
 	if p.Strategy != "linear" && p.Strategy != "free" {
@@ -419,6 +440,8 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 	p.Handlers = append(append([]Task{}, roleHandlers...), handlers...)
 
 	propagateTags(p.Tags, p.Tasks)
+	propagateModuleDefaults(p.ModuleDefaults, p.Tasks)
+	propagateModuleDefaults(p.ModuleDefaults, p.Handlers)
 
 	if rawPrompts, ok := m["vars_prompt"]; ok {
 		p.VarsPrompt, err = parseVarsPrompt(rawPrompts)
@@ -476,6 +499,100 @@ func parseVarsPrompt(v any) ([]VarPrompt, error) {
 // tag-filters ordinary tasks but runs a notified handler regardless of
 // tags, and this port matches that by never calling propagateTags on
 // handlers.
+// toModuleDefaults parses a module_defaults: value into per-module
+// argument maps. Real Ansible accepts either one mapping or a LIST of
+// mappings (merged in order, a later one replacing an earlier one's
+// whole entry for a module), and module names may be given
+// fully-qualified — a play-level "ansible.builtin.copy" default was
+// measured applying to a task written as bare "copy", so both sides are
+// normalized to the short name here.
+//
+// A "group/..." key is REFUSED rather than ignored: it names an action
+// group, which this port has no concept of, so honouring the playbook
+// as written is impossible and silently dropping those defaults would
+// run the module with arguments the playbook did not ask for. Real
+// Ansible warns and ignores it when the action groups are unavailable.
+func toModuleDefaults(v any) (map[string]map[string]any, error) {
+	if v == nil {
+		return nil, nil
+	}
+	var entries []any
+	switch val := v.(type) {
+	case []any:
+		entries = val
+	case map[string]any:
+		entries = []any{val}
+	default:
+		return nil, fmt.Errorf("want a mapping or a list of mappings, got %T", v)
+	}
+	out := map[string]map[string]any{}
+	for _, entry := range entries {
+		em, ok := entry.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("want a mapping, got %T", entry)
+		}
+		for name, raw := range em {
+			if strings.HasPrefix(name, "group/") {
+				return nil, fmt.Errorf("%q names an action group, which this port does not support", name)
+			}
+			args, ok := raw.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("%q: want a mapping of arguments, got %T", name, raw)
+			}
+			// A nearer entry REPLACES the whole per-module map rather
+			// than merging into it — Python's own dict.update at this
+			// level, confirmed by measurement.
+			out[modules.NormalizeName(name)] = args
+		}
+	}
+	return out, nil
+}
+
+// propagateModuleDefaults pushes outer module_defaults down the task
+// tree: each task ends up holding its own effective set, its own
+// entries winning over the enclosing block's and the play's, per module
+// name. Real Ansible walks the parent chain at run time instead; every
+// include in this port is resolved statically at parse time, so doing
+// it once here reaches exactly the same tasks.
+func propagateModuleDefaults(outer map[string]map[string]any, tasks []Task) {
+	for i := range tasks {
+		merged := outer
+		if len(tasks[i].ModuleDefaults) > 0 || len(outer) > 0 {
+			merged = make(map[string]map[string]any, len(outer)+len(tasks[i].ModuleDefaults))
+			for name, args := range outer {
+				merged[name] = args
+			}
+			for name, args := range tasks[i].ModuleDefaults {
+				merged[name] = args
+			}
+			tasks[i].ModuleDefaults = merged
+		}
+		propagateModuleDefaults(merged, tasks[i].Block)
+		propagateModuleDefaults(merged, tasks[i].Rescue)
+		propagateModuleDefaults(merged, tasks[i].Always)
+	}
+}
+
+// argsWithDefaults returns the task's arguments with its effective
+// module_defaults underneath — a default applies only where the task
+// does not set that key itself. The result is what gets Jinja2-rendered,
+// so a templated default ("mode: {{ m }}") resolves exactly as a
+// templated argument does.
+func (t Task) argsWithDefaults() map[string]any {
+	defaults := t.ModuleDefaults[modules.NormalizeName(t.Module)]
+	if len(defaults) == 0 {
+		return t.Args
+	}
+	out := make(map[string]any, len(defaults)+len(t.Args))
+	for k, v := range defaults {
+		out[k] = v
+	}
+	for k, v := range t.Args {
+		out[k] = v
+	}
+	return out
+}
+
 func propagateTags(inherited []string, tasks []Task) {
 	for i := range tasks {
 		effective := unionTags(inherited, tasks[i].Tags)
@@ -541,7 +658,8 @@ var taskReservedKeys = map[string]bool{
 	// Honoured, and added here so they are not mistaken for a module
 	// name — which is what a key this parser does not know becomes.
 	"no_log": true, "environment": true, "any_errors_fatal": true,
-	"check_mode": true,
+	"module_defaults": true,
+	"check_mode":      true,
 }
 
 // unhonouredTaskKeys are real Ansible task keywords this port PARSES but
@@ -570,7 +688,6 @@ var unhonouredTaskKeys = map[string]string{
 	"diff":               "use the --diff flag, which this port honours",
 	"ignore_unreachable": "",
 	"loop_with":          "use loop: or with_items:",
-	"module_defaults":    "",
 	"port":               "set it on the PLAY, which this port honours, or ansible_port on the host",
 	"remote_user":        "set it on the PLAY, which this port honours, or ansible_user on the host",
 	"throttle":           "use serial: on the play, which this port honours",
@@ -644,6 +761,10 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 		AnyErrorsFatal: boolDefault(m["any_errors_fatal"], false),
 		CheckMode:      toBoolPtr(m["check_mode"]),
 		Async:          toInt(m["async"]),
+	}
+	var mdErr error
+	if t.ModuleDefaults, mdErr = toModuleDefaults(m["module_defaults"]); mdErr != nil {
+		return t, fmt.Errorf("task %q: module_defaults: %w", t.Name, mdErr)
 	}
 	if v, ok := m["retries"]; ok {
 		n := toInt(v)
