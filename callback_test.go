@@ -87,9 +87,9 @@ func TestDefaultCallbackOutput(t *testing.T) {
 		"skipping: [web1]\n" +
 		"fatal: [web2]: FAILED! => {\"changed\": false, \"msg\": \"boom\"}\n" +
 		"\nPLAY RECAP\n" +
-		"web1                     : ok=1    changed=0    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0   \n" +
-		"web2                     : ok=1    changed=1    unreachable=0    failed=1    skipped=0    rescued=0    ignored=0   \n" +
-		"web3                     : ok=1    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   \n" +
+		"web1                       : ok=1    changed=0    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0   \n" +
+		"web2                       : ok=1    changed=1    unreachable=0    failed=1    skipped=0    rescued=0    ignored=0   \n" +
+		"web3                       : ok=1    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   \n" +
 		// Real ansible-core ends its output with a blank line after the
 		// recap — measured with od, not assumed. This test asserted the
 		// opposite until then.
@@ -630,4 +630,73 @@ func TestRoleSrcResolvesAgainstRoleDirs(t *testing.T) {
 func e2eRun(t *testing.T, pb Playbook) (*RunResult, error) {
 	t.Helper()
 	return New(localhostInventory()).RunPlaybook(context.Background(), pb)
+}
+
+// TestDefaultCallbackRecapColors pins the coloured PLAY RECAP line
+// against bytes CAPTURED from real ansible-core 2.21.4 (run with
+// ANSIBLE_FORCE_COLOR=1 and read through cat -v), not against a reading
+// of ansible/utils/color.py. Two things here are easy to get wrong and
+// were wrong before this test existed: only the host name is coloured
+// (not the whole line), and a column whose count is zero stays
+// UNCOLOURED even though every other column around it is painted.
+func TestDefaultCallbackRecapColors(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		results []Result
+		rescued map[string]int
+		want    string
+	}{{
+		// Real witness, for a play that ended ok=4 changed=1
+		// unreachable=0 failed=1 skipped=1 rescued=1 ignored=1:
+		//
+		//	\033[0;31mh1\033[0m                         : \033[0;32mok=4   \033[0m ...
+		name: "failed host, every column but unreachable non-zero",
+		results: []Result{
+			{Host: "h1"},
+			{Host: "h1", Changed: true},
+			{Host: "h1", Skipped: true},
+			{Host: "h1", Failed: true, Ignored: true},
+			{Host: "h1", Failed: true}, // the one the rescue below recovered
+			{Host: "h1"},               // the rescue task itself, which counts as ok
+			{Host: "h1", Failed: true},
+		},
+		rescued: map[string]int{"h1": 1},
+		want: "\033[0;31mh1\033[0m                         : " +
+			"\033[0;32mok=4   \033[0m \033[0;33mchanged=1   \033[0m unreachable=0    " +
+			"\033[0;31mfailed=1   \033[0m \033[0;36mskipped=1   \033[0m " +
+			"\033[0;32mrescued=1   \033[0m \033[1;35mignored=1   \033[0m\n",
+	}, {
+		// Real witness, for an unreachable host: the host name goes
+		// red (not bright red), while the unreachable COLUMN is
+		// bright red — two different colours in one line.
+		name:    "unreachable host",
+		results: []Result{{Host: "hx", Unreachable: true}},
+		want: "\033[0;31mhx\033[0m                         : ok=0    changed=0    " +
+			"\033[1;31munreachable=1   \033[0m failed=0    skipped=0    rescued=0    ignored=0   \n",
+	}, {
+		// A clean run: the host is green, and only the one non-zero
+		// column is painted.
+		name:    "all ok",
+		results: []Result{{Host: "h1"}},
+		want: "\033[0;32mh1\033[0m                         : \033[0;32mok=1   \033[0m " +
+			"changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   \n",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			NewDefaultCallback(&buf, true).OnStats(&RunResult{
+				Plays: []PlayResult{{Results: tc.results, Rescued: tc.rescued}},
+			})
+			got := buf.String()
+			_, line, ok := strings.Cut(got, "PLAY RECAP\033[0m\n")
+			if !ok {
+				t.Fatalf("no recap banner in %q", got)
+			}
+			// Real ansible-core ends its output with one blank line
+			// after the recap rows, so the captured line is followed
+			// by an empty one.
+			if line != tc.want+"\n" {
+				t.Errorf("recap =\n%q\nwant\n%q", line, tc.want+"\n")
+			}
+		})
+	}
 }
