@@ -226,6 +226,11 @@ type execCtx struct {
 	// 0) means unlimited, matching every fan-out point's own prior
 	// behavior before Forks existed.
 	sem chan struct{}
+
+	// playAborted records that any_errors_fatal or max_fail_percentage
+	// tripped. It stops the whole PLAY, not just this batch: a rolling
+	// update that gives up must not roll on to the next batch.
+	playAborted bool
 }
 
 // acquire blocks until a fork slot is free (a no-op when ec.sem is nil,
@@ -386,7 +391,11 @@ func (e *Engine) runPlay(ctx context.Context, play Play) (*PlayResult, error) {
 		for _, cb := range e.Callbacks {
 			cb.OnPlayStart(play, names)
 		}
-		e.runBatch(ctx, play, batch, pr)
+		if e.runBatch(ctx, play, batch, pr) {
+			// any_errors_fatal or max_fail_percentage gave up: the
+			// remaining batches are not attempted.
+			break
+		}
 	}
 	return pr, nil
 }
@@ -467,7 +476,9 @@ func pctToInt(value string, total int) int {
 	return n
 }
 
-func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Host, pr *PlayResult) {
+// Returns whether a safety limit stopped the play, in which case no
+// later batch runs.
+func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Host, pr *PlayResult) (aborted bool) {
 	ec := &execCtx{
 		engine:        e,
 		play:          play,
@@ -506,10 +517,11 @@ func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Hos
 	active := activeHosts(ec.states, order)
 	if play.Strategy == "free" {
 		runFree(ctx, ec, play, active, pr)
-		return
+		return ec.playAborted
 	}
 	active = ec.runTaskList(ctx, play.Tasks, active, pr)
 	ec.runHandlers(ctx, order, pr)
+	return ec.playAborted
 }
 
 // runFree implements the "free" strategy: every host runs the play's
@@ -591,8 +603,66 @@ func (ec *execCtx) runTaskList(ctx context.Context, tasks []Task, active []strin
 		} else {
 			active = ec.runSingleTask(ctx, task, active, pr, true)
 		}
+		// any_errors_fatal / max_fail_percentage are checked after each
+		// task, which is where real Ansible checks them.
+		active = ec.applySafetyLimits(task, active, pr)
 	}
 	return active
+}
+
+// applySafetyLimits stops the play when any_errors_fatal or
+// max_fail_percentage says a failure has gone far enough — a port of
+// the two checks real Ansible's linear strategy makes after every task
+// (plugins/strategy/linear.py).
+//
+// Both were PARSED and then ignored here, which is the worst shape for
+// a safety brake: a play saying "if any host fails, stop" carried on
+// deploying to the rest of the fleet, and said nothing.
+//
+// Returns the hosts that may continue — empty once a limit has tripped,
+// with every remaining host marked failed, as real Ansible marks them.
+func (ec *execCtx) applySafetyLimits(task Task, active []string, pr *PlayResult) []string {
+	if len(active) == 0 {
+		return active
+	}
+
+	// Cumulative across the batch, not just this task: real Ansible
+	// compares its whole failed-host set against the batch size.
+	failed := 0
+	for _, st := range ec.states {
+		if st.failed {
+			failed++
+		}
+	}
+	if failed == 0 {
+		return active
+	}
+
+	// A task's own any_errors_fatal overrides the play's. run_once
+	// implies it: real Ansible treats a failing run_once task as
+	// fatal for everyone, since the one host stood in for all of them.
+	fatal := ec.play.AnyErrorsFatal || task.AnyErrorsFatal || task.RunOnce
+
+	overLimit := false
+	if pct := ec.play.MaxFailPercentage; pct != nil && len(ec.states) > 0 {
+		// Real Ansible's own arithmetic: failed/batch_size compared
+		// against pct/100, strictly greater. So 20% failed with
+		// max_fail_percentage: 20 CONTINUES, and 19 does not.
+		overLimit = float64(failed)/float64(len(ec.states)) > *pct/100.0
+	}
+	if !fatal && !overLimit {
+		return active
+	}
+
+	for _, h := range active {
+		st := ec.states[h]
+		if st.failed {
+			continue
+		}
+		st.failed = true
+	}
+	ec.playAborted = true
+	return nil
 }
 
 func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr *PlayResult) []string {
