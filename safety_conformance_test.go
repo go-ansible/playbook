@@ -3,6 +3,8 @@ package playbook
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -251,5 +253,68 @@ func TestPlayConnectionLocalRuns(t *testing.T) {
 	}
 	if !ran {
 		t.Error("the task did not run")
+	}
+}
+
+// TestCheckModeTriState pins check_mode: at play and task level. The
+// tri-state matters in BOTH directions, and this port honoured neither:
+// a play saying `check_mode: true` wrote the file it promised not to,
+// and a task saying `check_mode: false` had no way to run for real
+// under --check.
+func TestCheckModeTriState(t *testing.T) {
+	yes, no := true, false
+	tests := []struct {
+		name string
+		flag bool  // the --check flag
+		play *bool // the play's check_mode:
+		task *bool // the task's own
+		want bool  // is this task a dry run?
+	}{
+		{"nothing set", false, nil, nil, false},
+		{"--check alone", true, nil, nil, true},
+		// A play can ask for a dry run without the flag.
+		{"play true", false, &yes, nil, true},
+		// And can force a real run despite the flag.
+		{"play false under --check", true, &no, nil, false},
+		// A task overrides its play either way.
+		{"task true under a false play", false, &no, &yes, true},
+		{"task false under a true play", false, &yes, &no, false},
+		// The case real playbooks use: read state for real while the
+		// rest of the run is predicting.
+		{"task false under --check", true, nil, &no, false},
+		{"task true without the flag", false, nil, &yes, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := New(localhostInventory())
+			e.CheckMode = tt.flag
+			ec := &execCtx{engine: e, play: Play{CheckMode: tt.play}}
+			if got := ec.inCheckMode(Task{CheckMode: tt.task}); got != tt.want {
+				t.Errorf("inCheckMode = %v, real ansible-core gives %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// End to end: a play that says check_mode: true must not write.
+func TestPlayCheckModeWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "out.txt")
+	pb, err := Parse([]byte(`
+- name: p
+  hosts: all
+  gather_facts: false
+  check_mode: true
+  tasks:
+    - {name: t, copy: {content: "written\n", dest: ` + target + `}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(localhostInventory()).RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Error("check_mode: true on the play was ignored — the file was written")
 	}
 }

@@ -1862,7 +1862,7 @@ func resolveRoleSrc(task Task, args map[string]any) {
 // and runs; one that does not is skipped with real Ansible's own reason,
 // never executed for real.
 func (ec *execCtx) checkModeGate(task Task, args map[string]any) (skip bool, res modules.Result) {
-	if !ec.engine.CheckMode {
+	if !ec.inCheckMode(task) {
 		return false, modules.Result{}
 	}
 	if !modules.SupportsCheckMode(task.Module) {
@@ -2087,4 +2087,23 @@ func withPlayConnection(play Play, vars map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// inCheckMode decides whether one task is a dry run: its own
+// check_mode: if it set one, else its play's, else the --check flag.
+//
+// The tri-state matters in both directions. A play saying
+// `check_mode: true` is a dry run even without the flag — this port
+// ignored that, so a playbook asking to change NOTHING wrote the file.
+// And a task saying `check_mode: false` runs for real even under
+// --check, which is how a playbook reads the state it needs in order to
+// predict the rest.
+func (ec *execCtx) inCheckMode(task Task) bool {
+	if task.CheckMode != nil {
+		return *task.CheckMode
+	}
+	if ec.play.CheckMode != nil {
+		return *ec.play.CheckMode
+	}
+	return ec.engine.CheckMode
 }

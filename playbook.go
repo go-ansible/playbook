@@ -48,6 +48,11 @@ type Play struct {
 	// runs. A task's own environment: is merged over it, key by key.
 	Environment map[string]any
 
+	// CheckMode forces this play into (or out of) a dry run, whatever
+	// the --check flag says. Nil means "follow the flag" — which is NOT
+	// the same as false, since false forces a REAL run under --check.
+	CheckMode *bool
+
 	// Connection, RemoteUser and Port are the play's connection
 	// defaults — ansible's connection:, remote_user: and port:. Each is
 	// overridden by the matching host variable (ansible_connection,
@@ -220,6 +225,12 @@ type Task struct {
 	// both set.
 	Environment map[string]any
 
+	// CheckMode forces this task into (or out of) a dry run. Setting it
+	// FALSE is the useful case: real Ansible runs such a task for real
+	// even under --check, which is how a playbook reads state it needs
+	// in order to predict the rest.
+	CheckMode *bool
+
 	// AnyErrorsFatal stops the whole play when THIS task fails on any
 	// host, whatever the play's own setting.
 	AnyErrorsFatal bool
@@ -347,6 +358,7 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 		Tags:              toStringList(m["tags"]),
 		Serial:            toSerialList(m["serial"]),
 		Environment:       toMap(m["environment"]),
+		CheckMode:         toBoolPtr(m["check_mode"]),
 		Connection:        str(m["connection"]),
 		RemoteUser:        str(m["remote_user"]),
 		Port:              toInt(m["port"]),
@@ -523,6 +535,7 @@ var taskReservedKeys = map[string]bool{
 	// Honoured, and added here so they are not mistaken for a module
 	// name — which is what a key this parser does not know becomes.
 	"no_log": true, "environment": true, "any_errors_fatal": true,
+	"check_mode": true,
 }
 
 // unhonouredTaskKeys are real Ansible task keywords this port PARSES but
@@ -544,7 +557,6 @@ var unhonouredTaskKeys = map[string]string{
 	"async_val":          "use async:",
 	"become_exe":         "",
 	"become_flags":       "",
-	"check_mode":         "use the --check flag, which this port honours",
 	"collections":        "fully-qualified module names resolve without it",
 	"connection":         "set it on the PLAY, which this port honours, or ansible_connection on the host",
 	"debugger":           "",
@@ -624,6 +636,7 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 		NoLog:          boolDefault(m["no_log"], false),
 		Environment:    toMap(m["environment"]),
 		AnyErrorsFatal: boolDefault(m["any_errors_fatal"], false),
+		CheckMode:      toBoolPtr(m["check_mode"]),
 		Async:          toInt(m["async"]),
 	}
 	if v, ok := m["retries"]; ok {
@@ -1286,4 +1299,14 @@ func toFloatPtr(v any) *float64 {
 		return nil
 	}
 	return &f
+}
+
+// toBoolPtr reads a tri-state boolean keyword: absent means "inherit",
+// which is distinct from an explicit false.
+func toBoolPtr(v any) *bool {
+	b, ok := v.(bool)
+	if !ok {
+		return nil
+	}
+	return &b
 }
