@@ -5,9 +5,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -503,6 +505,7 @@ func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Hos
 		ec.states[h.Name] = &hostState{name: h.Name, vc: vc, notify: map[string]bool{}}
 		order = append(order, h.Name)
 	}
+	order = orderHosts(order, play.Order)
 
 	ec.connectAndGatherFacts(ctx, play, pr)
 	defer func() {
@@ -854,22 +857,39 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	succeeded := make(map[string]bool, len(runOn))
-	for _, h := range runOn {
-		wg.Add(1)
-		go func(h string) {
-			defer wg.Done()
-			release := ec.acquire()
-			defer release()
+
+	// With a single fork there is no concurrency to gain, and letting
+	// goroutines race for the one slot makes the ORDER they run in
+	// arbitrary — which defeats order: and makes `-f 1` output differ
+	// between runs. Real ansible-core at forks 1 runs hosts strictly in
+	// order, so this does too.
+	if ec.engine.Forks == 1 {
+		for _, h := range runOn {
 			st := ec.states[h]
-			failed := ec.runTaskOnHost(ctx, task, st, pr, isHandler)
-			mu.Lock()
-			if failed {
+			if ec.runTaskOnHost(ctx, task, st, pr, isHandler) {
 				st.failed = true
 			} else {
 				succeeded[h] = true
 			}
-			mu.Unlock()
-		}(h)
+		}
+	} else {
+		for _, h := range runOn {
+			wg.Add(1)
+			go func(h string) {
+				defer wg.Done()
+				release := ec.acquire()
+				defer release()
+				st := ec.states[h]
+				failed := ec.runTaskOnHost(ctx, task, st, pr, isHandler)
+				mu.Lock()
+				if failed {
+					st.failed = true
+				} else {
+					succeeded[h] = true
+				}
+				mu.Unlock()
+			}(h)
+		}
 	}
 	wg.Wait()
 
@@ -2106,4 +2126,32 @@ func (ec *execCtx) inCheckMode(task Task) bool {
 		return *ec.play.CheckMode
 	}
 	return ec.engine.CheckMode
+}
+
+// orderHosts sequences a play's hosts the way its order: asks. The
+// names arrive in inventory order, which is the default and what every
+// other mode is derived from.
+//
+// Measured against real ansible-core 2.21.4 with five hosts: inventory
+// and sorted both give h1..h5 there, reverse_sorted and
+// reverse_inventory both give h5..h1, and shuffle is random. An
+// unknown value is left alone rather than rejected, matching how this
+// port treats the rest of a play it does not fully model.
+func orderHosts(order []string, mode string) []string {
+	out := append([]string(nil), order...)
+	switch mode {
+	case "", "inventory":
+		return out
+	case "sorted":
+		sort.Strings(out)
+	case "reverse_sorted":
+		sort.Sort(sort.Reverse(sort.StringSlice(out)))
+	case "reverse_inventory":
+		for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+			out[i], out[j] = out[j], out[i]
+		}
+	case "shuffle":
+		rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+	}
+	return out
 }

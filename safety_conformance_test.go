@@ -318,3 +318,81 @@ func TestPlayCheckModeWritesNothing(t *testing.T) {
 		t.Error("check_mode: true on the play was ignored — the file was written")
 	}
 }
+
+// TestOrderHosts pins order: against real ansible-core 2.21.4, measured
+// with five hosts and forks 1 so execution order, not reporting order,
+// was what got compared.
+func TestOrderHosts(t *testing.T) {
+	inventoryOrder := []string{"h3", "h1", "h5", "h2", "h4"}
+	tests := []struct {
+		mode string
+		want []string
+	}{
+		// The default keeps inventory order — NOT sorted order, which
+		// is why the fixture above is deliberately unsorted.
+		{"", []string{"h3", "h1", "h5", "h2", "h4"}},
+		{"inventory", []string{"h3", "h1", "h5", "h2", "h4"}},
+		{"sorted", []string{"h1", "h2", "h3", "h4", "h5"}},
+		{"reverse_sorted", []string{"h5", "h4", "h3", "h2", "h1"}},
+		// Reverse of the INVENTORY, not of the sort.
+		{"reverse_inventory", []string{"h4", "h2", "h5", "h1", "h3"}},
+		// An unknown value is left alone rather than rejected.
+		{"nonsense", []string{"h3", "h1", "h5", "h2", "h4"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			got := orderHosts(inventoryOrder, tt.mode)
+			if strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("orderHosts(%q) = %v, want %v", tt.mode, got, tt.want)
+			}
+			// The caller's slice is never reordered in place.
+			if strings.Join(inventoryOrder, ",") != "h3,h1,h5,h2,h4" {
+				t.Fatalf("the input was mutated: %v", inventoryOrder)
+			}
+		})
+	}
+
+	// shuffle returns the same SET, whatever the order.
+	got := orderHosts(inventoryOrder, "shuffle")
+	sorted := append([]string(nil), got...)
+	sort.Strings(sorted)
+	if strings.Join(sorted, ",") != "h1,h2,h3,h4,h5" {
+		t.Errorf("shuffle lost or invented a host: %v", got)
+	}
+}
+
+// With one fork, hosts run strictly in order — letting goroutines race
+// for the single slot made `-f 1` output differ between runs, which
+// defeated order: entirely.
+func TestSingleForkRunsInOrder(t *testing.T) {
+	pb, err := Parse([]byte(`
+- name: p
+  hosts: all
+  gather_facts: false
+  order: reverse_sorted
+  tasks:
+    - {name: t, debug: {msg: "{{ inventory_hostname }}"}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Repeated: the defect this pins was a race, so one run could come
+	// out right by luck.
+	for i := 0; i < 10; i++ {
+		e := New(fiveHostInventory())
+		e.Forks = 1
+		var mu sync.Mutex
+		var seen []string
+		e.OnResult = func(r Result) {
+			mu.Lock()
+			defer mu.Unlock()
+			seen = append(seen, r.Host)
+		}
+		if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(seen, ","); got != "h5,h4,h3,h2,h1" {
+			t.Fatalf("run %d: order was %q, want h5,h4,h3,h2,h1", i, got)
+		}
+	}
+}

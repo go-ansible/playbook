@@ -48,6 +48,11 @@ type Play struct {
 	// runs. A task's own environment: is merged over it, key by key.
 	Environment map[string]any
 
+	// Order is how the play's hosts are sequenced: "inventory" (the
+	// default), "sorted", "reverse_sorted", "reverse_inventory" or
+	// "shuffle".
+	Order string
+
 	// CheckMode forces this play into (or out of) a dry run, whatever
 	// the --check flag says. Nil means "follow the flag" — which is NOT
 	// the same as false, since false forces a REAL run under --check.
@@ -358,6 +363,7 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 		Tags:              toStringList(m["tags"]),
 		Serial:            toSerialList(m["serial"]),
 		Environment:       toMap(m["environment"]),
+		Order:             str(m["order"]),
 		CheckMode:         toBoolPtr(m["check_mode"]),
 		Connection:        str(m["connection"]),
 		RemoteUser:        str(m["remote_user"]),
