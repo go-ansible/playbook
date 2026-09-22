@@ -68,7 +68,7 @@ func TestUnhonouredTaskKeywordsAreNamed(t *testing.T) {
 	for _, kw := range []string{
 		"connection: local", "remote_user: x", "port: 22", "throttle: 2",
 		"diff: true", "collections: [a.b]",
-		"module_defaults: {}", "timeout: 30",
+		"timeout: 30",
 		"ignore_unreachable: true", "delegate_facts: true",
 		"debugger: never", "become_flags: -H", "become_exe: sudo",
 	} {

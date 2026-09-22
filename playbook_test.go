@@ -1,6 +1,8 @@
 package playbook
 
 import (
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -340,5 +342,80 @@ func TestParseVarsAndSerial(t *testing.T) {
 	}
 	if pb[0].Tasks[0].Vars["y"] != 2 {
 		t.Fatalf("task Vars = %v", pb[0].Tasks[0].Vars)
+	}
+}
+
+// TestModuleDefaults pins the module_defaults semantics MEASURED
+// against real ansible-core 2.21.4, including the one that is easy to
+// get backwards: a nearer level replaces an outer level's whole entry
+// for a module rather than merging key by key. A play-level
+// `copy: {mode, content}` under a task-level `copy: {mode}` loses the
+// content there, and the task fails "src (or content) is required".
+func TestModuleDefaults(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  module_defaults:
+    file: {mode: "0640", owner: root}
+    ansible.builtin.copy: {mode: "0604"}
+  tasks:
+    - {name: plain, file: {path: /a, state: touch}}
+    - {name: fqcn-default-bare-task, copy: {dest: /b, content: x}}
+    - name: own defaults replace the play's whole entry
+      file: {path: /c, state: touch}
+      module_defaults: {file: {mode: "0642"}}
+    - name: block
+      module_defaults: {file: {mode: "0641"}}
+      block:
+        - {name: inblock, file: {path: /d, state: touch}}
+        - name: inblock-own
+          file: {path: /e, state: touch}
+          module_defaults: {file: {mode: "0600"}}
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	byName := map[string]Task{}
+	var walk func([]Task)
+	walk = func(ts []Task) {
+		for _, task := range ts {
+			byName[task.Name] = task
+			walk(task.Block)
+		}
+	}
+	walk(pb[0].Tasks)
+
+	for _, tc := range []struct {
+		task string
+		want map[string]any
+	}{
+		// The play's entry, untouched.
+		{"plain", map[string]any{"path": "/a", "state": "touch", "mode": "0640", "owner": "root"}},
+		// An FQCN key matches a task written with the bare name.
+		{"fqcn-default-bare-task", map[string]any{"dest": "/b", "content": "x", "mode": "0604"}},
+		// REPLACES: owner is gone, not merged in from the play.
+		{"own defaults replace the play's whole entry", map[string]any{"path": "/c", "state": "touch", "mode": "0642"}},
+		{"inblock", map[string]any{"path": "/d", "state": "touch", "mode": "0641"}},
+		{"inblock-own", map[string]any{"path": "/e", "state": "touch", "mode": "0600"}},
+	} {
+		got := byName[tc.task].argsWithDefaults()
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: args = %v, want %v", tc.task, got, tc.want)
+		}
+	}
+}
+
+// TestModuleDefaultsRefusesActionGroup: a "group/..." key names an
+// action group, which this port has no concept of. Real Ansible warns
+// and ignores it; ignoring it here would run the module with arguments
+// the playbook did not ask for, so it is refused by name instead.
+func TestModuleDefaultsRefusesActionGroup(t *testing.T) {
+	_, err := Parse([]byte(`
+- hosts: all
+  module_defaults:
+    group/foo: {mode: "0640"}
+  tasks: [{file: {path: /a}}]
+`))
+	if err == nil || !strings.Contains(err.Error(), "action group") {
+		t.Errorf("err = %v, want one naming the action group", err)
 	}
 }

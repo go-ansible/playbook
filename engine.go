@@ -1224,7 +1224,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		for attempt := 1; attempt <= totalAttempts; attempt++ {
 			mergedVars = iter.Merged()
 
-			renderedArgs, err := ec.engine.Template.RenderValue(map[string]any(task.Args), mergedVars)
+			renderedArgs, err := ec.engine.Template.RenderValue(task.argsWithDefaults(), mergedVars)
 			args, _ := renderedArgs.(map[string]any)
 			if args == nil {
 				args = map[string]any{}
