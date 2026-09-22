@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/go-ansible/inventory"
 )
 
 // The play every case below runs: h1 fails, the rest succeed, and a
@@ -156,5 +158,98 @@ func TestMaxFailPercentageAbsentIsNotZero(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("%q parsed to %s, want %s", tt.yaml, got, tt.want)
 		}
+	}
+}
+
+// TestPlayConnectionKeywords pins connection:, remote_user: and port:
+// at play level, and the precedence real ansible-core applies: a HOST
+// variable beats the play keyword.
+//
+// Ignoring connection: was not cosmetic — a play saying
+// `connection: local` was connected to over SSH, so every task on it
+// came back UNREACHABLE.
+func TestPlayConnectionKeywords(t *testing.T) {
+	tests := []struct {
+		name     string
+		hostVars map[string]any
+		play     Play
+		want     map[string]any
+	}{{
+		name: "the play's keywords apply",
+		play: Play{Connection: "local", RemoteUser: "deploy", Port: 2222},
+		want: map[string]any{"ansible_connection": "local", "ansible_user": "deploy", "ansible_port": 2222},
+	}, {
+		// Measured: a host var of ssh against a play keyword of local,
+		// and the host var won.
+		name:     "a host variable beats the play keyword",
+		hostVars: map[string]any{"ansible_connection": "ssh"},
+		play:     Play{Connection: "local"},
+		want:     map[string]any{"ansible_connection": "ssh"},
+	}, {
+		name:     "each key is decided on its own",
+		hostVars: map[string]any{"ansible_user": "root"},
+		play:     Play{Connection: "local", RemoteUser: "deploy"},
+		want:     map[string]any{"ansible_connection": "local", "ansible_user": "root"},
+	}, {
+		name: "a play with no keywords changes nothing",
+		play: Play{},
+		want: map[string]any{},
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := map[string]any{}
+			for k, v := range tt.hostVars {
+				in[k] = v
+			}
+			got := withPlayConnection(tt.play, in)
+			for k, want := range tt.want {
+				if got[k] != want {
+					t.Errorf("%s = %#v, want %#v", k, got[k], want)
+				}
+			}
+			// The caller's map is never modified in place.
+			if len(tt.hostVars) != len(in) {
+				t.Errorf("the input map was mutated: %v", in)
+			}
+		})
+	}
+}
+
+// End to end: a play whose only route to the host is `connection: local`
+// runs, where it used to come back UNREACHABLE.
+func TestPlayConnectionLocalRuns(t *testing.T) {
+	inv, err := inventory.ParseYAML([]byte("all:\n  hosts:\n    not-a-real-host:\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb, err := Parse([]byte(`
+- name: p
+  hosts: all
+  gather_facts: false
+  connection: local
+  tasks:
+    - {name: t, command: echo ran}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(inv)
+	var mu sync.Mutex
+	var unreachable, ran bool
+	e.OnResult = func(r Result) {
+		mu.Lock()
+		defer mu.Unlock()
+		unreachable = unreachable || r.Unreachable
+		ran = ran || (r.Task == "t" && !r.Failed && !r.Skipped)
+	}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	if unreachable {
+		t.Error("connection: local was ignored, so the host was tried over SSH")
+	}
+	if !ran {
+		t.Error("the task did not run")
 	}
 }

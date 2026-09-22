@@ -48,6 +48,16 @@ type Play struct {
 	// runs. A task's own environment: is merged over it, key by key.
 	Environment map[string]any
 
+	// Connection, RemoteUser and Port are the play's connection
+	// defaults — ansible's connection:, remote_user: and port:. Each is
+	// overridden by the matching host variable (ansible_connection,
+	// ansible_user, ansible_port), which is the precedence real Ansible
+	// applies: measured with a host var of ssh against a play keyword
+	// of local, where the HOST VAR won.
+	Connection string
+	RemoteUser string
+	Port       int
+
 	// AnyErrorsFatal stops the WHOLE play the moment any host fails,
 	// rather than carrying on with the hosts that are still healthy.
 	AnyErrorsFatal bool
@@ -337,6 +347,9 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 		Tags:              toStringList(m["tags"]),
 		Serial:            toSerialList(m["serial"]),
 		Environment:       toMap(m["environment"]),
+		Connection:        str(m["connection"]),
+		RemoteUser:        str(m["remote_user"]),
+		Port:              toInt(m["port"]),
 		AnyErrorsFatal:    boolDefault(m["any_errors_fatal"], false),
 		MaxFailPercentage: toFloatPtr(m["max_fail_percentage"]),
 	}
@@ -533,15 +546,15 @@ var unhonouredTaskKeys = map[string]string{
 	"become_flags":       "",
 	"check_mode":         "use the --check flag, which this port honours",
 	"collections":        "fully-qualified module names resolve without it",
-	"connection":         "set ansible_connection on the host or group instead",
+	"connection":         "set it on the PLAY, which this port honours, or ansible_connection on the host",
 	"debugger":           "",
 	"delegate_facts":     "",
 	"diff":               "use the --diff flag, which this port honours",
 	"ignore_unreachable": "",
 	"loop_with":          "use loop: or with_items:",
 	"module_defaults":    "",
-	"port":               "set ansible_port on the host or group instead",
-	"remote_user":        "set ansible_user on the host or group instead",
+	"port":               "set it on the PLAY, which this port honours, or ansible_port on the host",
+	"remote_user":        "set it on the PLAY, which this port honours, or ansible_user on the host",
 	"throttle":           "use serial: on the play, which this port honours",
 	"timeout":            "",
 }
