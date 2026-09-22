@@ -561,7 +561,7 @@ func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *Pla
 			defer wg.Done()
 			release := ec.acquire()
 			defer release()
-			conn, err := e.Connect(ctx, st.name, st.vc.Merged())
+			conn, err := e.Connect(ctx, st.name, withPlayConnection(play, st.vc.Merged()))
 			if err != nil {
 				mu.Lock()
 				st.failed = true
@@ -2052,4 +2052,39 @@ func pythonBool(b bool) string {
 		return "True"
 	}
 	return "False"
+}
+
+// withPlayConnection adds the play's connection:, remote_user: and
+// port: to a host's variables, WITHOUT overriding what the host itself
+// declares. That is the precedence real Ansible applies — measured with
+// a host var of ssh against a play keyword of local, where the host var
+// won, and a task keyword against a play keyword, where the task won.
+//
+// Ignoring these was not a cosmetic gap: a play saying
+// `connection: local` was connected to over SSH, so every task on it
+// came back UNREACHABLE.
+func withPlayConnection(play Play, vars map[string]any) map[string]any {
+	defaults := map[string]any{}
+	if play.Connection != "" {
+		defaults["ansible_connection"] = play.Connection
+	}
+	if play.RemoteUser != "" {
+		defaults["ansible_user"] = play.RemoteUser
+	}
+	if play.Port != 0 {
+		defaults["ansible_port"] = play.Port
+	}
+	if len(defaults) == 0 {
+		return vars
+	}
+
+	out := make(map[string]any, len(vars)+len(defaults))
+	for k, v := range defaults {
+		out[k] = v
+	}
+	// The host's own values go in second, so they win.
+	for k, v := range vars {
+		out[k] = v
+	}
+	return out
 }
