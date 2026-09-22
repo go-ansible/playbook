@@ -27,7 +27,13 @@ const (
 	// for the retry line. Confirmed both in ansible/constants.py and
 	// by capturing the real escape from a coloured run.
 	colorDarkGray = "\033[1;30m"
-	colorReset    = "\033[0m"
+	// COLOR_UNREACHABLE ("bright red") and COLOR_WARN ("bright
+	// purple"), which the PLAY RECAP uses for those two columns and
+	// nothing else does. Captured from a real coloured run rather
+	// than derived from the colour names.
+	colorBrightRed    = "\033[1;31m"
+	colorBrightPurple = "\033[1;35m"
+	colorReset        = "\033[0m"
 )
 
 // DefaultCallback prints a run the way ansible-playbook prints it to a
@@ -64,6 +70,19 @@ func (c *DefaultCallback) colorize(code, s string) string {
 		return s
 	}
 	return code + s + colorReset
+}
+
+// countField is real Ansible's colorize() (ansible/utils/color.py): a
+// "lead=N" column whose count is padded to four characters, coloured
+// only when the count is NOT zero. That last condition is the whole
+// reason a real recap shows "unreachable=0" plain next to a coloured
+// "failed=1".
+func (c *DefaultCallback) countField(lead string, n int, code string) string {
+	field := fmt.Sprintf("%s=%-4d", lead, n)
+	if n == 0 {
+		return field
+	}
+	return c.colorize(code, field)
 }
 
 func (c *DefaultCallback) OnPlayStart(play Play, hosts []string) {
@@ -196,17 +215,35 @@ func (c *DefaultCallback) OnStats(rr *RunResult) {
 	sort.Strings(hosts)
 	for _, h := range hosts {
 		s := summary[h]
-		// Real Ansible's own column set and order. Ok already includes
-		// changed and ignored results, as it does there.
-		line := fmt.Sprintf("%-24s : ok=%-4d changed=%-4d unreachable=%-4d failed=%-4d skipped=%-4d rescued=%-4d ignored=%-4d",
-			h, s.Ok, s.Changed, s.Unreachable, s.Failed, s.Skipped, s.Rescued, s.Ignored)
+		// Real Ansible's own column set and order (default.py's
+		// v2_playbook_on_stats). Ok already includes changed and
+		// ignored results, as it does there.
+		//
+		// The host name is the only part hostcolor() colours, and the
+		// column it sits in differs with colour: "%-26s" of the bare
+		// name, but "%-37s" of the COLOURED one — and since the
+		// escapes are exactly 11 characters, both come out 26 columns
+		// wide on screen. Padding the whole line to 24 and wrapping
+		// all of it in one colour, as this did before, was wrong on
+		// both counts.
 		code := colorGreen
 		if s.Failed > 0 || s.Unreachable > 0 {
 			code = colorRed
 		} else if s.Changed > 0 {
 			code = colorYellow
 		}
-		fmt.Fprintln(c.w, c.colorize(code, line))
+		host := fmt.Sprintf("%-26s", h)
+		if c.color {
+			host = fmt.Sprintf("%-37s", c.colorize(code, h))
+		}
+		fmt.Fprintf(c.w, "%s : %s %s %s %s %s %s %s\n", host,
+			c.countField("ok", s.Ok, colorGreen),
+			c.countField("changed", s.Changed, colorYellow),
+			c.countField("unreachable", s.Unreachable, colorBrightRed),
+			c.countField("failed", s.Failed, colorRed),
+			c.countField("skipped", s.Skipped, colorCyan),
+			c.countField("rescued", s.Rescued, colorGreen),
+			c.countField("ignored", s.Ignored, colorBrightPurple))
 	}
 
 	// Real Ansible ends its output with a blank line after the recap —
