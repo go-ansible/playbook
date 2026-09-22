@@ -47,7 +47,16 @@ type Play struct {
 	// Environment is added to the environment of every command the play
 	// runs. A task's own environment: is merged over it, key by key.
 	Environment map[string]any
-	Roles       []RoleRef
+
+	// AnyErrorsFatal stops the WHOLE play the moment any host fails,
+	// rather than carrying on with the hosts that are still healthy.
+	AnyErrorsFatal bool
+
+	// MaxFailPercentage stops the play once more than this percentage
+	// of the current batch has failed. Nil means no limit — which is
+	// NOT the same as 0, where a single failure stops everything.
+	MaxFailPercentage *float64
+	Roles             []RoleRef
 
 	// Strategy is "linear" (the default: every host finishes task N
 	// before any host starts task N+1) or "free" (each host runs its
@@ -201,6 +210,10 @@ type Task struct {
 	// both set.
 	Environment map[string]any
 
+	// AnyErrorsFatal stops the whole play when THIS task fails on any
+	// host, whatever the play's own setting.
+	AnyErrorsFatal bool
+
 	// NoLog hides this task's result. Real Ansible replaces the whole
 	// result with a single `censored` key, keeping only `changed`, so a
 	// task handling a credential cannot leak it through the callback —
@@ -314,16 +327,18 @@ var playReservedKeys = map[string]bool{
 
 func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 	p := Play{
-		Name:         str(m["name"]),
-		Hosts:        str(m["hosts"]),
-		GatherFacts:  boolDefault(m["gather_facts"], true),
-		Become:       boolDefault(m["become"], false),
-		BecomeUser:   strDefault(m["become_user"], "root"),
-		BecomeMethod: strDefault(m["become_method"], "sudo"),
-		Vars:         toMap(m["vars"]),
-		Tags:         toStringList(m["tags"]),
-		Serial:       toSerialList(m["serial"]),
-		Environment:  toMap(m["environment"]),
+		Name:              str(m["name"]),
+		Hosts:             str(m["hosts"]),
+		GatherFacts:       boolDefault(m["gather_facts"], true),
+		Become:            boolDefault(m["become"], false),
+		BecomeUser:        strDefault(m["become_user"], "root"),
+		BecomeMethod:      strDefault(m["become_method"], "sudo"),
+		Vars:              toMap(m["vars"]),
+		Tags:              toStringList(m["tags"]),
+		Serial:            toSerialList(m["serial"]),
+		Environment:       toMap(m["environment"]),
+		AnyErrorsFatal:    boolDefault(m["any_errors_fatal"], false),
+		MaxFailPercentage: toFloatPtr(m["max_fail_percentage"]),
 	}
 	if p.Hosts == "" {
 		return p, fmt.Errorf("play %q: missing required field: hosts", p.Name)
@@ -494,7 +509,7 @@ var taskReservedKeys = map[string]bool{
 
 	// Honoured, and added here so they are not mistaken for a module
 	// name — which is what a key this parser does not know becomes.
-	"no_log": true, "environment": true,
+	"no_log": true, "environment": true, "any_errors_fatal": true,
 }
 
 // unhonouredTaskKeys are real Ansible task keywords this port PARSES but
@@ -513,7 +528,6 @@ var taskReservedKeys = map[string]bool{
 var unhonouredTaskKeys = map[string]string{
 	"action":             "write the module as its own key instead",
 	"args":               "pass module arguments under the module key",
-	"any_errors_fatal":   "",
 	"async_val":          "use async:",
 	"become_exe":         "",
 	"become_flags":       "",
@@ -578,25 +592,26 @@ func normalizeKeys(m map[string]any) map[string]any {
 func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 	m = normalizeKeys(m)
 	t := Task{
-		Name:         str(m["name"]),
-		When:         normalizeWhen(m["when"]),
-		Loop:         firstNonNil(m["loop"], m["with_items"]),
-		LoopVar:      "item",
-		Register:     str(m["register"]),
-		IgnoreErrors: boolDefault(m["ignore_errors"], false),
-		ChangedWhen:  str(m["changed_when"]),
-		FailedWhen:   str(m["failed_when"]),
-		Tags:         toStringList(m["tags"]),
-		BecomeUser:   str(m["become_user"]),
-		Notify:       toStringList(m["notify"]),
-		Vars:         toMap(m["vars"]),
-		DelegateTo:   str(m["delegate_to"]),
-		Until:        normalizeWhen(m["until"]),
-		Delay:        floatDefault(m["delay"], 5),
-		RunOnce:      boolDefault(m["run_once"], false),
-		NoLog:        boolDefault(m["no_log"], false),
-		Environment:  toMap(m["environment"]),
-		Async:        toInt(m["async"]),
+		Name:           str(m["name"]),
+		When:           normalizeWhen(m["when"]),
+		Loop:           firstNonNil(m["loop"], m["with_items"]),
+		LoopVar:        "item",
+		Register:       str(m["register"]),
+		IgnoreErrors:   boolDefault(m["ignore_errors"], false),
+		ChangedWhen:    str(m["changed_when"]),
+		FailedWhen:     str(m["failed_when"]),
+		Tags:           toStringList(m["tags"]),
+		BecomeUser:     str(m["become_user"]),
+		Notify:         toStringList(m["notify"]),
+		Vars:           toMap(m["vars"]),
+		DelegateTo:     str(m["delegate_to"]),
+		Until:          normalizeWhen(m["until"]),
+		Delay:          floatDefault(m["delay"], 5),
+		RunOnce:        boolDefault(m["run_once"], false),
+		NoLog:          boolDefault(m["no_log"], false),
+		Environment:    toMap(m["environment"]),
+		AnyErrorsFatal: boolDefault(m["any_errors_fatal"], false),
+		Async:          toInt(m["async"]),
 	}
 	if v, ok := m["retries"]; ok {
 		n := toInt(v)
@@ -1232,4 +1247,30 @@ func roleName(t Task) string {
 		return ""
 	}
 	return filepath.Base(t.RoleDir)
+}
+
+// toFloatPtr reads a max_fail_percentage, which is absent far more
+// often than it is zero — and the two mean opposite things, so it
+// cannot collapse into a plain float.
+func toFloatPtr(v any) *float64 {
+	var f float64
+	switch n := v.(type) {
+	case nil:
+		return nil
+	case int:
+		f = float64(n)
+	case int64:
+		f = float64(n)
+	case float64:
+		f = n
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(n), 64)
+		if err != nil {
+			return nil
+		}
+		f = parsed
+	default:
+		return nil
+	}
+	return &f
 }
