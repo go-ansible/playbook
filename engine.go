@@ -224,7 +224,13 @@ type hostState struct {
 	// what a rescue: block reads back as ansible_failed_task and
 	// ansible_failed_result. Recorded per host, and only ever touched
 	// by that host's own goroutine.
-	currentTask      Task
+	currentTask Task
+
+	// pending buffers this host's results while a task runs several
+	// hosts CONCURRENTLY, so they can be emitted in host order
+	// afterwards. Touched only by this host's own goroutine.
+	pending          []Result
+	buffering        bool
 	lastFailedTask   Task
 	lastFailedResult map[string]any
 
@@ -1015,6 +1021,10 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 			}
 		}
 	} else {
+		// Hold each host's output and emit it in host order once they
+		// have all finished — the work stays concurrent, the
+		// TRANSCRIPT stops depending on which goroutine won.
+		ec.bufferHosts(runOn)
 		for _, h := range runOn {
 			wg.Add(1)
 			go func(h string) {
@@ -1032,6 +1042,8 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 				mu.Unlock()
 			}(h)
 		}
+		wg.Wait()
+		ec.flushPending(pr, runOn)
 	}
 	wg.Wait()
 
@@ -2261,18 +2273,59 @@ func (ec *execCtx) report(pr *PlayResult, r Result) {
 	// not one — real only sets these when a block is actually
 	// rescuing — and neither is an unreachable host, which no rescue
 	// gets to run for.
-	if r.Failed && !r.Ignored && !r.Unreachable {
-		if st := ec.states[r.Host]; st != nil {
-			st.lastFailedTask = st.currentTask
-			st.lastFailedResult = failedResultDict(r)
-		}
+	st := ec.states[r.Host]
+	if r.Failed && !r.Ignored && !r.Unreachable && st != nil {
+		// Recorded immediately, not at flush time: a rescue: reads it
+		// back while the block is still deciding what to do.
+		st.lastFailedTask = st.currentTask
+		st.lastFailedResult = failedResultDict(r)
 	}
+	// While a task is running several hosts at once, a host's results
+	// are held and emitted in HOST ORDER when they have all finished.
+	// Emitting as each goroutine happened to finish made the
+	// transcript of an ordinary two-host play differ between runs —
+	// the DEFAULT strategy, not an exotic one. Real is stable there.
+	if st != nil && st.buffering {
+		st.pending = append(st.pending, r)
+		return
+	}
+	ec.emit(pr, r)
+}
+
+// emit delivers one result to the recap and every callback.
+func (ec *execCtx) emit(pr *PlayResult, r Result) {
 	pr.record(r)
 	if ec.engine.OnResult != nil {
 		ec.engine.OnResult(r)
 	}
 	for _, cb := range ec.engine.Callbacks {
 		cb.OnTaskResult(r)
+	}
+}
+
+// bufferHosts holds each host's results until flushPending emits them
+// in the given order. The work still runs concurrently; only its
+// REPORTING is serialized, which is what real's own single-threaded
+// result loop amounts to.
+func (ec *execCtx) bufferHosts(hosts []string) {
+	for _, h := range hosts {
+		if st := ec.states[h]; st != nil {
+			st.buffering, st.pending = true, nil
+		}
+	}
+}
+
+func (ec *execCtx) flushPending(pr *PlayResult, hosts []string) {
+	for _, h := range hosts {
+		st := ec.states[h]
+		if st == nil {
+			continue
+		}
+		st.buffering = false
+		for _, r := range st.pending {
+			ec.emit(pr, r)
+		}
+		st.pending = nil
 	}
 }
 

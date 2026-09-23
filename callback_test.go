@@ -1438,3 +1438,52 @@ func TestAssertThatIsAConditional(t *testing.T) {
 		}
 	}
 }
+
+// TestOutputOrderIsDeterministic: a task that runs several hosts at
+// once reported each host as its goroutine happened to finish, so the
+// TRANSCRIPT of an ordinary two-host play differed between runs — in
+// the DEFAULT strategy, not an exotic one. Real is stable there.
+//
+// Repeated rather than checked once: a racy order agrees with the
+// expected one most of the time, which is exactly how this survived.
+func TestOutputOrderIsDeterministic(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - {name: a, debug: {msg: "{{ inventory_hostname }}"}}
+    - {name: b, debug: {msg: "{{ inventory_hostname }}"}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv := localhostInventory()
+	for _, h := range []string{"alpha", "bravo", "charlie", "delta"} {
+		inv.AddHost(h, map[string]any{"ansible_connection": "local"})
+	}
+	want := ""
+	for i := 0; i < 25; i++ {
+		cb := &recordingCallback{}
+		e := New(inv)
+		e.Callbacks = []Callback{cb}
+		if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+			t.Fatal(err)
+		}
+		var order []string
+		for _, r := range cb.results {
+			order = append(order, r.Task+":"+r.Host)
+		}
+		got := strings.Join(order, " ")
+		if i == 0 {
+			want = got
+			continue
+		}
+		if got != want {
+			t.Fatalf("run %d differs:\n  %s\nfirst run:\n  %s", i, got, want)
+		}
+	}
+	// And the order is the play's host order, not an arbitrary one.
+	if !strings.HasPrefix(want, "a:") {
+		t.Errorf("order = %s", want)
+	}
+}
