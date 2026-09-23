@@ -16,6 +16,12 @@ type Result struct {
 	Failed  bool
 	Skipped bool
 
+	// BannerOnly marks a result that exists only to banner its task:
+	// real Ansible's meta: fires the task-start callback and no runner
+	// callback at all, so it prints a TASK header with no line under
+	// it and counts toward nothing in the recap.
+	BannerOnly bool
+
 	// Ignored marks a failure the task's own ignore_errors swallowed.
 	// Real Ansible counts one of these under "ignored" AND under "ok",
 	// not under "failed" — a run whose every failure was ignored reports
@@ -136,6 +142,24 @@ func (rr *RunResult) Failed() bool {
 	return false
 }
 
+// Unreachable reports whether any host ended the run unreachable —
+// one whose ignore_unreachable said to carry on does NOT count, since
+// real Ansible files it under ok/ignored instead.
+//
+// It is separate from Failed because real ansible-playbook's exit code
+// distinguishes them, and unreachable WINS: 4 if any host was
+// unreachable, else 2 if any failed, else 0 (ansible's own
+// StrategyBase._process_pending_results tail, and measured — a run with
+// one failed host and one unreachable host exits 4, not 2 and not 6).
+func (rr *RunResult) Unreachable() bool {
+	for _, s := range rr.Summary() {
+		if s.Unreachable > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // foldLoops collapses each looped task's iterations into one result
 // per host, leaving every other result untouched and in order.
 //
@@ -200,8 +224,18 @@ func (rr *RunResult) Summary() map[string]*HostSummary {
 	// iteration, so a 100-item loop inflated the recap by a hundred.
 	for _, p := range rr.Plays {
 		for _, r := range foldLoops(p.Results) {
+			if r.BannerOnly {
+				continue
+			}
 			s := summaryFor(r.Host)
 			switch {
+			case r.Unreachable && r.Ignored:
+				// ignore_unreachable: real Ansible counts the host
+				// under ok and ignored, NOT under unreachable — a
+				// play that ignores every unreachable host reports
+				// unreachable=0 and exits 0. Measured on 2.21.4.
+				s.Ignored++
+				s.Ok++
 			case r.Unreachable:
 				s.Unreachable++
 			case r.Skipped:

@@ -69,7 +69,7 @@ func TestUnhonouredTaskKeywordsAreNamed(t *testing.T) {
 		"connection: local", "remote_user: x", "port: 22", "throttle: 2",
 		"diff: true", "collections: [a.b]",
 		"timeout: 30",
-		"ignore_unreachable: true", "delegate_facts: true",
+		"delegate_facts: true",
 		"debugger: never", "become_flags: -H", "become_exe: sudo",
 	} {
 		t.Run(kw, func(t *testing.T) {

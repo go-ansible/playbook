@@ -58,6 +58,13 @@ type Play struct {
 	// "src (or content) is required".
 	ModuleDefaults map[string]map[string]any
 
+	// IgnoreUnreachable keeps a host in the play when it cannot be
+	// reached, instead of dropping it: the result still prints
+	// UNREACHABLE!, the recap counts it ok+ignored rather than
+	// unreachable, and the next task tries to connect again. A task
+	// may override it either way.
+	IgnoreUnreachable bool
+
 	// Order is how the play's hosts are sequenced: "inventory" (the
 	// default), "sorted", "reverse_sorted", "reverse_inventory" or
 	// "shuffle".
@@ -246,6 +253,12 @@ type Task struct {
 	// propagateModuleDefaults. Applying it is argsWithDefaults's job.
 	ModuleDefaults map[string]map[string]any
 
+	// IgnoreUnreachable overrides the play's for this task; nil means
+	// inherit it. Real Ansible decides per TASK, which is what makes
+	// an ignored-unreachable ping followed by an ordinary command
+	// report UNREACHABLE twice and drop the host only on the second.
+	IgnoreUnreachable *bool
+
 	// CheckMode forces this task into (or out of) a dry run. Setting it
 	// FALSE is the useful case: real Ansible runs such a task for real
 	// even under --check, which is how a playbook reads state it needs
@@ -365,7 +378,7 @@ var playReservedKeys = map[string]bool{
 	"become_user": true, "become_method": true, "vars": true, "vars_files": true,
 	"tasks": true, "handlers": true, "roles": true, "tags": true, "serial": true,
 	"strategy": true, "pre_tasks": true, "post_tasks": true, "vars_prompt": true,
-	"module_defaults": true,
+	"module_defaults": true, "ignore_unreachable": true,
 }
 
 func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
@@ -386,6 +399,7 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 		RemoteUser:        str(m["remote_user"]),
 		Port:              toInt(m["port"]),
 		AnyErrorsFatal:    boolDefault(m["any_errors_fatal"], false),
+		IgnoreUnreachable: boolDefault(m["ignore_unreachable"], false),
 		MaxFailPercentage: toFloatPtr(m["max_fail_percentage"]),
 	}
 	if p.Hosts == "" {
@@ -658,8 +672,8 @@ var taskReservedKeys = map[string]bool{
 	// Honoured, and added here so they are not mistaken for a module
 	// name — which is what a key this parser does not know becomes.
 	"no_log": true, "environment": true, "any_errors_fatal": true,
-	"module_defaults": true,
-	"check_mode":      true,
+	"module_defaults": true, "ignore_unreachable": true,
+	"check_mode": true,
 }
 
 // unhonouredTaskKeys are real Ansible task keywords this port PARSES but
@@ -676,22 +690,21 @@ var taskReservedKeys = map[string]bool{
 // (ansible.playbook.task.Task.fattributes, 42 entries) is the source of
 // this list.
 var unhonouredTaskKeys = map[string]string{
-	"action":             "write the module as its own key instead",
-	"args":               "pass module arguments under the module key",
-	"async_val":          "use async:",
-	"become_exe":         "",
-	"become_flags":       "",
-	"collections":        "fully-qualified module names resolve without it",
-	"connection":         "set it on the PLAY, which this port honours, or ansible_connection on the host",
-	"debugger":           "",
-	"delegate_facts":     "",
-	"diff":               "use the --diff flag, which this port honours",
-	"ignore_unreachable": "",
-	"loop_with":          "use loop: or with_items:",
-	"port":               "set it on the PLAY, which this port honours, or ansible_port on the host",
-	"remote_user":        "set it on the PLAY, which this port honours, or ansible_user on the host",
-	"throttle":           "use serial: on the play, which this port honours",
-	"timeout":            "",
+	"action":         "write the module as its own key instead",
+	"args":           "pass module arguments under the module key",
+	"async_val":      "use async:",
+	"become_exe":     "",
+	"become_flags":   "",
+	"collections":    "fully-qualified module names resolve without it",
+	"connection":     "set it on the PLAY, which this port honours, or ansible_connection on the host",
+	"debugger":       "",
+	"delegate_facts": "",
+	"diff":           "use the --diff flag, which this port honours",
+	"loop_with":      "use loop: or with_items:",
+	"port":           "set it on the PLAY, which this port honours, or ansible_port on the host",
+	"remote_user":    "set it on the PLAY, which this port honours, or ansible_user on the host",
+	"throttle":       "use serial: on the play, which this port honours",
+	"timeout":        "",
 }
 
 // includeReservedKeys are the extra keys recognized on an
@@ -740,27 +753,28 @@ func normalizeKeys(m map[string]any) map[string]any {
 func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 	m = normalizeKeys(m)
 	t := Task{
-		Name:           str(m["name"]),
-		When:           normalizeWhen(m["when"]),
-		Loop:           firstNonNil(m["loop"], m["with_items"]),
-		LoopVar:        "item",
-		Register:       str(m["register"]),
-		IgnoreErrors:   boolDefault(m["ignore_errors"], false),
-		ChangedWhen:    str(m["changed_when"]),
-		FailedWhen:     str(m["failed_when"]),
-		Tags:           toStringList(m["tags"]),
-		BecomeUser:     str(m["become_user"]),
-		Notify:         toStringList(m["notify"]),
-		Vars:           toMap(m["vars"]),
-		DelegateTo:     str(m["delegate_to"]),
-		Until:          normalizeWhen(m["until"]),
-		Delay:          floatDefault(m["delay"], 5),
-		RunOnce:        boolDefault(m["run_once"], false),
-		NoLog:          boolDefault(m["no_log"], false),
-		Environment:    toMap(m["environment"]),
-		AnyErrorsFatal: boolDefault(m["any_errors_fatal"], false),
-		CheckMode:      toBoolPtr(m["check_mode"]),
-		Async:          toInt(m["async"]),
+		Name:              str(m["name"]),
+		When:              normalizeWhen(m["when"]),
+		Loop:              firstNonNil(m["loop"], m["with_items"]),
+		LoopVar:           "item",
+		Register:          str(m["register"]),
+		IgnoreErrors:      boolDefault(m["ignore_errors"], false),
+		ChangedWhen:       str(m["changed_when"]),
+		FailedWhen:        str(m["failed_when"]),
+		Tags:              toStringList(m["tags"]),
+		BecomeUser:        str(m["become_user"]),
+		Notify:            toStringList(m["notify"]),
+		Vars:              toMap(m["vars"]),
+		DelegateTo:        str(m["delegate_to"]),
+		Until:             normalizeWhen(m["until"]),
+		Delay:             floatDefault(m["delay"], 5),
+		RunOnce:           boolDefault(m["run_once"], false),
+		NoLog:             boolDefault(m["no_log"], false),
+		Environment:       toMap(m["environment"]),
+		AnyErrorsFatal:    boolDefault(m["any_errors_fatal"], false),
+		CheckMode:         toBoolPtr(m["check_mode"]),
+		IgnoreUnreachable: toBoolPtr(m["ignore_unreachable"]),
+		Async:             toInt(m["async"]),
 	}
 	var mdErr error
 	if t.ModuleDefaults, mdErr = toModuleDefaults(m["module_defaults"]); mdErr != nil {

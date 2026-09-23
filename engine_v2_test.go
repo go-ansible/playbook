@@ -442,21 +442,30 @@ func TestEngineMetaFlushHandlersRunsNotifiedHandlersImmediately(t *testing.T) {
 	if rr.Failed() {
 		t.Fatalf("run failed: %+v", rr.Plays)
 	}
-	var handlerIdx, flushIdx, endOfPlayHandlerCount int
+	handlerIdx, flushIdx, afterIdx := -1, -1, -1
+	endOfPlayHandlerCount := 0
 	results := resultsFor(rr, "localhost")
 	for i, r := range results {
-		if r.Task == "my handler" {
-			if handlerIdx == 0 {
+		switch r.Task {
+		case "my handler":
+			if handlerIdx < 0 {
 				handlerIdx = i
 			}
 			endOfPlayHandlerCount++
-		}
-		if r.Task == "flush now" {
+		case "flush now":
 			flushIdx = i
+		case "after flush":
+			afterIdx = i
 		}
 	}
-	if handlerIdx == 0 || handlerIdx > flushIdx {
-		t.Fatalf("handler should have run during the flush (index %d), flush at %d", handlerIdx, flushIdx)
+	// Real Ansible banners the meta task FIRST and runs the handlers
+	// under it — measured: "TASK [m-flush]" then "RUNNING HANDLER
+	// [hh]". So the handler lands between the flush and the next task,
+	// which is also what proves it ran at the flush rather than at the
+	// end of the play.
+	if flushIdx < 0 || handlerIdx < flushIdx || afterIdx < 0 || handlerIdx > afterIdx {
+		t.Fatalf("handler (index %d) should sit between the flush (%d) and the next task (%d)",
+			handlerIdx, flushIdx, afterIdx)
 	}
 	if endOfPlayHandlerCount != 1 {
 		t.Fatalf("handler ran %d times, want exactly 1 (not re-run at end of play)", endOfPlayHandlerCount)

@@ -204,9 +204,20 @@ func defaultPrompt(msg string, private bool) (string, error) {
 }
 
 type hostState struct {
-	name   string
-	conn   remoteexec.Connection
-	vc     *vars.Context
+	name string
+	conn remoteexec.Connection
+	vc   *vars.Context
+
+	// connErr is why this host has no connection, kept rather than
+	// reported at connect time. Real Ansible connects per TASK, so an
+	// unreachable host reports UNREACHABLE under the first task that
+	// actually needs a connection — "Gathering Facts", or the first
+	// module task — not under a synthetic step of its own. Keeping the
+	// error here is what lets this port report it in the same place,
+	// and lets a task whose ignore_unreachable said to carry on be
+	// followed by another that tries again.
+	connErr error
+
 	failed bool
 	notify map[string]bool
 }
@@ -554,6 +565,65 @@ func runFree(ctx context.Context, ec *execCtx, play Play, active []string, pr *P
 	wg.Wait()
 }
 
+// gatheringFactsTask is what real Ansible banners its implicit
+// fact-gathering step as — "TASK [Gathering Facts]". This port called
+// it "(gather_facts)", which diverged on the second line of every
+// transcript of a play that gathers facts, i.e. the default.
+const gatheringFactsTask = "Gathering Facts"
+
+// connectionlessModules are the tasks real Ansible runs without ever
+// touching the connection. The list is its own: the action plugins in
+// ansible/plugins/action/ that call neither _execute_module nor
+// _low_level_execute_command in 2.21.4, plus meta, which the strategy
+// handles rather than any action plugin. Confirmed by running each one
+// against an unreachable host — they all reported ok, while `command`
+// reported UNREACHABLE.
+//
+// It only matters for a host that has no connection: real re-attempts
+// the connection per task, so a debug after an ignored-unreachable
+// ping still runs, while a command after it reports UNREACHABLE again.
+var connectionlessModules = map[string]bool{
+	"add_host":               true,
+	"assert":                 true,
+	"debug":                  true,
+	"fail":                   true,
+	"group_by":               true,
+	"include_vars":           true,
+	"meta":                   true,
+	"pause":                  true,
+	"set_fact":               true,
+	"set_stats":              true,
+	"validate_argument_spec": true,
+}
+
+// ignoreUnreachable reports whether an unreachable host should stay in
+// the play for this task: the task's own setting if it has one, else
+// the play's. Real Ansible decides per task, which is what makes an
+// ignored-unreachable ping followed by an ordinary command report
+// UNREACHABLE twice and drop the host only on the second.
+func (ec *execCtx) ignoreUnreachable(task Task) bool {
+	if task.IgnoreUnreachable != nil {
+		return *task.IgnoreUnreachable
+	}
+	return ec.play.IgnoreUnreachable
+}
+
+// reportUnreachable records an unreachable result for one task and
+// reports whether the host should now be dropped from the play. The
+// caller must hold whatever lock guards ec.report at its call site.
+func (ec *execCtx) reportUnreachable(pr *PlayResult, st *hostState, task Task, err error) bool {
+	ignored := ec.ignoreUnreachable(task)
+	ec.report(pr, Result{
+		Host: st.name, Task: task.Name, Module: task.Module,
+		Failed: true, Unreachable: true, Ignored: ignored, Msg: err.Error(),
+	})
+	if ignored {
+		return false
+	}
+	st.failed = true
+	return true
+}
+
 func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *PlayResult) {
 	e := ec.engine
 	var wg sync.WaitGroup
@@ -566,9 +636,14 @@ func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *Pla
 			defer release()
 			conn, err := e.Connect(ctx, st.name, withPlayConnection(play, st.vc.Merged()))
 			if err != nil {
+				// Not reported here: a play that gathers no facts
+				// needs no connection yet, and real Ansible says
+				// nothing until a task actually wants one.
 				mu.Lock()
-				st.failed = true
-				ec.report(pr, Result{Host: st.name, Task: "(connect)", Failed: true, Unreachable: true, Msg: err.Error()})
+				st.connErr = err
+				if play.GatherFacts {
+					ec.reportUnreachable(pr, st, Task{Name: gatheringFactsTask}, err)
+				}
 				mu.Unlock()
 				return
 			}
@@ -580,13 +655,13 @@ func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *Pla
 			if err != nil {
 				mu.Lock()
 				st.failed = true
-				ec.report(pr, Result{Host: st.name, Task: "(gather_facts)", Failed: true, Msg: err.Error()})
+				ec.report(pr, Result{Host: st.name, Task: gatheringFactsTask, Failed: true, Msg: err.Error()})
 				mu.Unlock()
 				return
 			}
 			st.vc.Set(vars.Facts, vars.InjectFacts(gathered))
 			mu.Lock()
-			ec.report(pr, Result{Host: st.name, Task: "(gather_facts)", Msg: "ok"})
+			ec.report(pr, Result{Host: st.name, Task: gatheringFactsTask, Msg: "ok"})
 			mu.Unlock()
 		}(st)
 	}
@@ -1137,6 +1212,23 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		}
 	}
 
+	// meta is not a module at all — real Ansible's strategy executes it
+	// directly. It banners its task and reports NO result line, and
+	// contributes nothing to the recap. flush_handlers runs its
+	// handlers AFTER that banner, which is why this is handled here,
+	// ahead of the ordinary result path, rather than inside
+	// runDirective: reporting the meta result afterwards put the
+	// handler's own banner above the meta task's.
+	if modules.NormalizeName(task.Module) == "meta" {
+		ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, BannerOnly: true})
+		if err := ec.runMeta(ctx, task.Args, st, pr); err != nil {
+			ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: err.Error()})
+			st.failed = true
+			return !task.IgnoreErrors
+		}
+		return false
+	}
+
 	items := []any{nil}
 	looping := task.Loop != nil
 	if looping {
@@ -1247,6 +1339,18 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				anyFailed = true
 				aborted = true
 				break
+			}
+			if !handled && st.conn == nil && st.connErr != nil &&
+				!connectionlessModules[modules.NormalizeName(task.Module)] && task.DelegateTo == "" {
+				// The host has no connection and this task needs one.
+				// Real Ansible re-attempts the connection for every
+				// such task, so this reports UNREACHABLE again rather
+				// than skipping silently — and drops the host unless
+				// THIS task says to ignore it.
+				if ec.reportUnreachable(pr, st, task, st.connErr) {
+					return true
+				}
+				return false
 			}
 			if !handled {
 				conn, dname, cerr := ec.connectionFor(ctx, task, mergedVars, st)
@@ -1530,9 +1634,6 @@ func (ec *execCtx) connectionFor(ctx context.Context, task Task, mergedVars map[
 // ordinary module dispatch.
 func (ec *execCtx) runDirective(ctx context.Context, task Task, st *hostState, args map[string]any, mergedVars map[string]any, pr *PlayResult) (result modules.Result, handled bool, err error) {
 	switch task.Module {
-	case "meta":
-		r, e := ec.runMeta(ctx, args, st, pr)
-		return r, true, e
 	case "add_host":
 		r, e := ec.runAddHost(args)
 		return r, true, e
@@ -1626,10 +1727,37 @@ func (ec *execCtx) runAssert(args map[string]any, st *hostState) (modules.Result
 		if truthy {
 			continue
 		}
-		msg := stringArg(args, "fail_msg", stringArg(args, "msg", fmt.Sprintf("Assertion failed: %v", cond)))
-		return modules.Fail(msg), nil
+		// Real's own failure shape: fail_msg (aliased msg), defaulting
+		// to a bare "Assertion failed" with the condition reported
+		// under its own `assertion` key rather than glued onto the
+		// message, plus evaluated_to. This port printed
+		// "Assertion failed: 1 == 2" and neither key.
+		msg := stringArg(args, "fail_msg", stringArg(args, "msg", "Assertion failed"))
+		res := modules.Fail(msg).
+			WithExtra("assertion", fmt.Sprintf("%v", cond)).
+			WithExtra("evaluated_to", false).
+			WithExtra("changed", false)
+		return withAssertVerbosity(res, args), nil
 	}
-	return modules.Ok(stringArg(args, "success_msg", "All assertions passed")), nil
+	res := modules.Ok(stringArg(args, "success_msg", "All assertions passed")).
+		WithExtra("changed", false)
+	return withAssertVerbosity(res, args), nil
+}
+
+// withAssertVerbosity reproduces real Ansible's assert action plugin
+// setting _ansible_verbose_always on its result unless quiet: true —
+// which is why a passing assert prints its whole result dict ("msg":
+// "All assertions passed") rather than a bare "ok: [h]". This port
+// printed the bare line, so an assert looked like it had not run.
+func withAssertVerbosity(res modules.Result, args map[string]any) modules.Result {
+	if quiet, _ := args["quiet"].(bool); quiet {
+		return res
+	}
+	// Real's assert sets result['changed'] = False explicitly on the
+	// success path, so its dump carries a "changed": false that
+	// debug's — which sets no such key — does not. Two action plugins,
+	// two result shapes; copied rather than unified.
+	return res.WithExtra(verboseAlwaysKey, true)
 }
 
 // evalCondition takes one assert condition. A bare bool is already
@@ -1661,9 +1789,14 @@ func stringArg(args map[string]any, key, fallback string) string {
 // them again) and clear_facts (drop the gathered-facts layer) are
 // supported; other meta actions (end_play, end_host, reset_connection,
 // ...) error rather than silently doing nothing.
-func (ec *execCtx) runMeta(ctx context.Context, args map[string]any, st *hostState, pr *PlayResult) (modules.Result, error) {
+func (ec *execCtx) runMeta(ctx context.Context, args map[string]any, st *hostState, pr *PlayResult) error {
 	action, _ := args["_raw_params"].(string)
 	switch action {
+	case "noop":
+		// Real Ansible's own no-op. It is what a generated or
+		// conditionally-templated playbook falls back to, so refusing
+		// it broke playbooks that do nothing.
+		return nil
 	case "flush_handlers":
 		for _, handler := range ec.play.Handlers {
 			if st.notify[handler.Name] {
@@ -1674,12 +1807,12 @@ func (ec *execCtx) runMeta(ctx context.Context, args map[string]any, st *hostSta
 			}
 		}
 		st.notify = map[string]bool{}
-		return modules.Ok("flushed handlers"), nil
+		return nil
 	case "clear_facts":
 		st.vc.Set(vars.Facts, map[string]any{})
-		return modules.Ok("cleared facts"), nil
+		return nil
 	default:
-		return modules.Result{}, fmt.Errorf("meta: %q not supported (only flush_handlers, clear_facts)", action)
+		return fmt.Errorf("meta: %q not supported (only noop, flush_handlers, clear_facts)", action)
 	}
 }
 

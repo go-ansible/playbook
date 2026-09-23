@@ -125,6 +125,9 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 	// port printed "TASK []", or nothing at all when several unnamed
 	// tasks ran in a row.
 	c.taskBanner(r)
+	if r.BannerOnly {
+		return
+	}
 	// Real Ansible's default callback emits the diff before the line
 	// that says what happened, so the reader sees the change and then
 	// its verdict. Measured from a real --diff --check run, which also
@@ -141,12 +144,15 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 		// so a failing shell task showed a return code and nothing else.
 		// An unreachable host gets its own UNREACHABLE! prefix there,
 		// measured the same way.
-		kind := "FAILED!"
+		// An unreachable host's line is COLOR_UNREACHABLE — bright
+		// red — where an ordinary failure is COLOR_ERROR, plain red.
+		// Captured from a real coloured run, not inferred.
+		kind, code := "FAILED!", colorRed
 		if r.Unreachable {
-			kind = "UNREACHABLE!"
+			kind, code = "UNREACHABLE!", colorBrightRed
 		}
 		line := fmt.Sprintf("fatal: [%s]: %s => %s", hostLabel(r), kind, c.resultJSON(r))
-		fmt.Fprintln(c.w, c.colorize(colorRed, line))
+		fmt.Fprintln(c.w, c.colorize(code, line))
 		if r.Ignored {
 			// Real Ansible says so, on its own line, so a red line that
 			// did not stop the run is not mistaken for one that did.
@@ -285,7 +291,15 @@ func (c *DefaultCallback) resultJSON(r Result) string {
 	if r.Unreachable {
 		fields["unreachable"] = true
 	}
-	out, err := template.ToJSON(fields, 0)
+	// A result carrying _ansible_verbose_always is INDENTED here too,
+	// not just on an ok line — real Ansible's _dump_results makes that
+	// one decision for both. Measured: a failing non-quiet assert dumps
+	// over five lines, a quiet one on a single line.
+	indent := 0
+	if v, ok := r.Extra[verboseAlwaysKey].(bool); ok && v {
+		indent = 4
+	}
+	out, err := template.ToJSON(fields, indent)
 	if err != nil {
 		// Never worth losing the failure itself over a rendering
 		// problem: fall back to the message.
