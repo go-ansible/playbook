@@ -1551,3 +1551,29 @@ func TestMagicVariables(t *testing.T) {
 		}
 	}
 }
+
+// TestLoopedArgsFailureSaysIgnoringOnce: a loop that closes with the
+// task-level "One or more items failed" summary said "...ignoring"
+// TWICE — once deferred by the failing items, once by the summary
+// line. The summary ends the task, so it is the one line owed.
+func TestLoopedArgsFailureSaysIgnoringOnce(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - {name: t, debug: {msg: "{{ nope }}"}, loop: [1, 2], ignore_errors: true}
+    - {name: after, debug: {msg: done}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	e := New(localhostInventory())
+	e.Callbacks = []Callback{NewDefaultCallback(&buf, false)}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(buf.String(), "...ignoring"); n != 1 {
+		t.Errorf(`"...ignoring" appeared %d times, want 1:\n%s`, n, buf.String())
+	}
+}
