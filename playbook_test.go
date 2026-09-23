@@ -419,3 +419,58 @@ func TestModuleDefaultsRefusesActionGroup(t *testing.T) {
 		t.Errorf("err = %v, want one naming the action group", err)
 	}
 }
+
+// TestActionAndLocalAction pins the three ways real names a module
+// somewhere other than its own key. All three were refused here:
+// action: and args: by name, local_action: by being mistaken for a
+// module ("the module local_action was not found").
+func TestActionAndLocalAction(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  tasks:
+    - {name: string form, action: command id -un}
+    - {name: mapping form, action: {module: copy, content: hi, dest: /tmp/x}}
+    - {name: local string, local_action: command id -un}
+    - {name: local mapping, local_action: {module: copy, content: hi, dest: /tmp/x}}
+    - {name: local keeps an explicit delegate, local_action: command id, delegate_to: elsewhere}
+    - {name: bare module, command: id -un}
+    - name: args sits under the module key
+      command: echo from-module-key
+      args: {_raw_params: echo from-args, chdir: /tmp}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Task{}
+	for _, task := range pb[0].Tasks {
+		byName[task.Name] = task
+	}
+	for _, tc := range []struct {
+		task, module, delegate string
+		args                   map[string]any
+	}{
+		// The first word of the string names the module; the rest is
+		// _raw_params — unlike the module-key form, where the WHOLE
+		// string is _raw_params.
+		{"string form", "command", "", map[string]any{"_raw_params": "id -un"}},
+		{"mapping form", "copy", "", map[string]any{"content": "hi", "dest": "/tmp/x"}},
+		// local_action is action plus delegate_to: localhost.
+		{"local string", "command", "localhost", map[string]any{"_raw_params": "id -un"}},
+		{"local mapping", "copy", "localhost", map[string]any{"content": "hi", "dest": "/tmp/x"}},
+		{"local keeps an explicit delegate", "command", "elsewhere", map[string]any{"_raw_params": "id"}},
+		{"bare module", "command", "", map[string]any{"_raw_params": "id -un"}},
+		// args: supplies what the module key does not set, and loses
+		// to it where both do — measured, the module key wins.
+		{"args sits under the module key", "command", "", map[string]any{
+			"_raw_params": "echo from-module-key", "chdir": "/tmp"}},
+	} {
+		got := byName[tc.task]
+		if got.Module != tc.module || got.DelegateTo != tc.delegate {
+			t.Errorf("%s: module=%q delegate=%q, want %q/%q",
+				tc.task, got.Module, got.DelegateTo, tc.module, tc.delegate)
+		}
+		if !reflect.DeepEqual(got.Args, tc.args) {
+			t.Errorf("%s: args = %#v, want %#v", tc.task, got.Args, tc.args)
+		}
+	}
+}

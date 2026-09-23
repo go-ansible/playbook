@@ -684,7 +684,7 @@ var taskReservedKeys = map[string]bool{
 	"name": true, "when": true, "loop": true, "loop_control": true,
 	"register": true, "ignore_errors": true, "changed_when": true,
 	"failed_when": true, "tags": true, "become": true, "become_user": true,
-	"become_method": true, "notify": true, "listen": true, "vars": true, "delegate_to": true,
+	"become_method": true, "notify": true, "listen": true, "action": true, "args": true, "local_action": true, "vars": true, "delegate_to": true,
 	"block": true, "rescue": true, "always": true, "with_items": true,
 	"until": true, "retries": true, "delay": true, "run_once": true,
 	"async": true, "poll": true,
@@ -710,8 +710,6 @@ var taskReservedKeys = map[string]bool{
 // (ansible.playbook.task.Task.fattributes, 42 entries) is the source of
 // this list.
 var unhonouredTaskKeys = map[string]string{
-	"action":         "write the module as its own key instead",
-	"args":           "pass module arguments under the module key",
 	"async_val":      "use async:",
 	"become_exe":     "",
 	"become_flags":   "",
@@ -768,6 +766,66 @@ func normalizeKeys(m map[string]any) map[string]any {
 		}
 	}
 	return out
+}
+
+// moduleFromValue reads the module name and arguments out of an
+// action:/local_action: value, which carries both. Real accepts two
+// shapes and so does this: a bare string whose FIRST WORD is the
+// module and whose remainder is _raw_params ("command id -un"), and a
+// mapping whose "module" key names it and whose other keys are the
+// arguments.
+func moduleFromValue(v any) (string, map[string]any, error) {
+	switch val := v.(type) {
+	case string:
+		name, rest, _ := strings.Cut(strings.TrimSpace(val), " ")
+		if name == "" {
+			return "", nil, errors.New("names no module")
+		}
+		args := map[string]any{}
+		if rest = strings.TrimSpace(rest); rest != "" {
+			args["_raw_params"] = rest
+		}
+		return name, args, nil
+	case map[string]any:
+		name, _ := val["module"].(string)
+		if name == "" {
+			return "", nil, errors.New(`needs a "module" key naming the module`)
+		}
+		args := map[string]any{}
+		for k, av := range val {
+			if k != "module" {
+				args[k] = av
+			}
+		}
+		return name, args, nil
+	default:
+		return "", nil, fmt.Errorf("want a string or a mapping, got %T", v)
+	}
+}
+
+// withExtraArgs folds an args: mapping into the task's arguments.
+// Measured: it sits UNDER the module key's own arguments — a task
+// with `command: echo from-module-key` and `args: {_raw_params: echo
+// from-args}` runs the former — so it supplies what the module key
+// does not set rather than overriding it.
+func withExtraArgs(t Task, m map[string]any) (Task, error) {
+	raw, ok := m["args"]
+	if !ok {
+		return t, nil
+	}
+	extra, ok := raw.(map[string]any)
+	if !ok {
+		return t, fmt.Errorf("task %q: args: want a mapping, got %T", t.Name, raw)
+	}
+	merged := make(map[string]any, len(extra)+len(t.Args))
+	for k, v := range extra {
+		merged[k] = v
+	}
+	for k, v := range t.Args {
+		merged[k] = v
+	}
+	t.Args = merged
+	return t, nil
 }
 
 func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
@@ -869,6 +927,26 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 		}
 	}
 
+	// action:/local_action: name the module INSIDE their value rather
+	// than as their own key. local_action is exactly action plus
+	// delegate_to: localhost — measured: its results banner
+	// "[h1 -> localhost]", the same as any delegated task's.
+	for _, key := range []string{"action", "local_action"} {
+		v, ok := m[key]
+		if !ok {
+			continue
+		}
+		name, args, err := moduleFromValue(v)
+		if err != nil {
+			return t, fmt.Errorf("task %q: %s: %w", t.Name, key, err)
+		}
+		t.Module, t.Args = name, args
+		if key == "local_action" && t.DelegateTo == "" {
+			t.DelegateTo = "localhost"
+		}
+		return withExtraArgs(t, m)
+	}
+
 	var moduleKey string
 	for k := range m {
 		if taskReservedKeys[k] || includeReservedKeys[k] {
@@ -902,7 +980,7 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 	default:
 		return t, fmt.Errorf("task %q: module %q: unsupported argument shape %T", t.Name, moduleKey, v)
 	}
-	return t, nil
+	return withExtraArgs(t, m)
 }
 
 // includeTasksTask resolves an include_tasks/import_tasks directive
