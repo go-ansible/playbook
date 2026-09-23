@@ -16,6 +16,19 @@ type Result struct {
 	Failed  bool
 	Skipped bool
 
+	// ArgsFailed marks a failure that happened BEFORE the module ran,
+	// while finalizing its arguments. Such a result has no module
+	// result dict behind it, so it carries none of the keys one would
+	// have — including the item/ansible_loop_var an iteration's own
+	// failure shows.
+	ArgsFailed bool
+
+	// DisplayOnly marks a line that is printed but counts toward
+	// nothing in the recap: real closes a loop whose arguments would
+	// not finalize with a task-level summary AFTER the per-item lines,
+	// and counts the task once, not twice.
+	DisplayOnly bool
+
 	// LoopVar is the name the loop bound its item to — "item" unless
 	// loop_control.loop_var said otherwise. A failing iteration's
 	// printed result carries it, as ansible_loop_var.
@@ -241,7 +254,7 @@ func (rr *RunResult) Summary() map[string]*HostSummary {
 	// iteration, so a 100-item loop inflated the recap by a hundred.
 	for _, p := range rr.Plays {
 		for _, r := range foldLoops(p.Results) {
-			if r.BannerOnly {
+			if r.BannerOnly || r.DisplayOnly {
 				continue
 			}
 			s := summaryFor(r.Host)

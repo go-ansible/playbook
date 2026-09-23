@@ -1272,3 +1272,106 @@ func TestLoopedFailureLines(t *testing.T) {
 		t.Errorf("...ignoring (%d) should come before the next banner (%d):\n%s", i, j, out)
 	}
 }
+
+// TestFailureWording pins the messages real ansible-core 2.21.4
+// writes, which name the module and the argument that could not be
+// resolved. This port said "args: template: evaluating expression
+// ..." — its own plumbing, not the playbook's problem.
+func TestFailureWording(t *testing.T) {
+	for _, tc := range []struct {
+		name, playbook, want string
+	}{{
+		name: "an argument that will not resolve names the module and the key",
+		playbook: `
+- hosts: all
+  gather_facts: false
+  tasks:
+    - {name: t, copy: {dest: /tmp/zz, content: "{{ nope }}"}, ignore_errors: true}`,
+		want: "Task failed: Finalization of task args for 'ansible.builtin.copy' failed: " +
+			"Error while resolving value for 'content': 'nope' is undefined",
+	}, {
+		name: "a when: that will not evaluate",
+		playbook: `
+- hosts: all
+  gather_facts: false
+  tasks:
+    - {name: t, debug: {msg: hi}, when: nope, ignore_errors: true}`,
+		want: "Task failed: A 'when' expression failed: Error while evaluating conditional: 'nope' is undefined",
+	}, {
+		// A changed_when: that will not evaluate is a task FAILURE.
+		// Both conditional errors were dropped here, so a broken
+		// expression left the task reporting whatever the module
+		// said — green, on a condition that never ran.
+		name: "a changed_when: that will not evaluate",
+		playbook: `
+- hosts: all
+  gather_facts: false
+  tasks:
+    - {name: t, command: "true", changed_when: nope, ignore_errors: true}`,
+		want: "Task failed: Action failed: A 'changed_when' expression failed: " +
+			"Error while evaluating conditional: 'nope' is undefined",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			pb, err := Parse([]byte(tc.playbook))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cb := &recordingCallback{}
+			e := New(localhostInventory())
+			e.Callbacks = []Callback{cb}
+			if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+				t.Fatal(err)
+			}
+			if len(cb.results) != 1 {
+				t.Fatalf("results = %#v", cb.results)
+			}
+			if got := cb.results[0].Msg; got != tc.want {
+				t.Errorf("msg =\n  %s\nwant\n  %s", got, tc.want)
+			}
+			// ignore_errors covers these failures too — it did not,
+			// so the recap counted them failed rather than ignored.
+			if !cb.results[0].Ignored {
+				t.Error("ignore_errors should cover a templating failure as well as a module one")
+			}
+		})
+	}
+}
+
+// TestLoopedArgsFailureSummary: real closes a loop whose arguments
+// would not finalize with one task-level line AFTER the per-item
+// ones, and counts the task ONCE. It does not do this for a loop
+// whose items merely failed in the module — measured both ways.
+func TestLoopedArgsFailureSummary(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - {name: t, debug: {msg: "{{ nope }}"}, loop: [1]}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	e := New(localhostInventory())
+	e.Callbacks = []Callback{NewDefaultCallback(&buf, false)}
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `failed: [localhost] (item=1) => {"msg": "Task failed: Finalization`) {
+		t.Errorf("no per-item line:\n%s", out)
+	}
+	if !strings.Contains(out, `fatal: [localhost]: FAILED! => {"msg": "One or more items failed"}`) {
+		t.Errorf("no summary line:\n%s", out)
+	}
+	// An args failure has no module result behind it, so it carries
+	// none of the keys one would have.
+	if strings.Contains(out, "ansible_loop_var") {
+		t.Errorf("an args failure should not carry a result dict's keys:\n%s", out)
+	}
+	// And the summary counts toward nothing: the task failed once.
+	if s := rr.Summary()["localhost"]; s == nil || s.Failed != 1 {
+		t.Errorf("summary = %+v, want failed=1 — not one per printed line", s)
+	}
+}

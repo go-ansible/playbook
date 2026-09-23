@@ -3,6 +3,7 @@ package playbook
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -767,7 +768,7 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 			st := ec.states[h]
 			ok, err := ec.evalWhen(task.When, st.vc.Merged())
 			if err != nil {
-				ec.report(pr, Result{Host: h, Task: task.Name, Failed: true, Msg: "when: " + err.Error()})
+				ec.report(pr, Result{Host: h, Task: task.Name, Failed: true, Msg: conditionalFailure("when", err)})
 				continue
 			}
 			if ok {
@@ -1274,7 +1275,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 	if task.When != "" && task.Loop == nil {
 		ok, err := ec.evalWhen(task.When, scope.Merged())
 		if err != nil {
-			ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: "when: " + err.Error()})
+			ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: conditionalFailure("when", err)})
 			return !task.IgnoreErrors
 		}
 		if !ok {
@@ -1293,7 +1294,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 	if modules.NormalizeName(task.Module) == "meta" {
 		ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, BannerOnly: true})
 		if err := ec.runMeta(ctx, task.Args, st, pr); err != nil {
-			ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: err.Error()})
+			ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: err.Error()})
 			st.failed = true
 			return !task.IgnoreErrors
 		}
@@ -1305,7 +1306,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 	if looping {
 		rendered, err := ec.engine.Template.RenderValue(task.Loop, scope.Merged())
 		if err != nil {
-			ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: "loop: " + err.Error()})
+			ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: "loop: " + err.Error()})
 			return !task.IgnoreErrors
 		}
 		if list, ok := rendered.([]any); ok {
@@ -1320,7 +1321,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		if task.LoopWith != "" {
 			produced, lerr := ec.engine.Template.Lookup(task.LoopWith, items, scope.Merged(), nil)
 			if lerr != nil {
-				ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true,
+				ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors,
 					Msg: "with_" + task.LoopWith + ": " + lerr.Error()})
 				return !task.IgnoreErrors
 			}
@@ -1341,6 +1342,11 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 	// registered value — real Ansible's own `results` list. Nil for a
 	// task that isn't looping, which registers its module fields flat.
 	var loopResults []any
+
+	// argsFailed records that an ITERATION could not have its
+	// arguments finalized, which real closes the task with a summary
+	// line for.
+	argsFailed := false
 
 	for index, item := range items {
 		iter := scope
@@ -1369,7 +1375,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			if task.When != "" {
 				ok, werr := ec.evalWhen(task.When, iter.Merged())
 				if werr != nil {
-					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: "when: " + werr.Error(), Item: item, ItemLabel: label, LoopVar: task.LoopVar, Looped: true})
+					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: conditionalFailure("when", werr), Item: item, ItemLabel: label, LoopVar: task.LoopVar, Looped: true})
 					anyFailed = true
 					if !task.IgnoreErrors {
 						break
@@ -1412,15 +1418,21 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		for attempt := 1; attempt <= totalAttempts; attempt++ {
 			mergedVars = iter.Merged()
 
-			renderedArgs, err := ec.engine.Template.RenderValue(task.argsWithDefaults(), mergedVars)
-			args, _ := renderedArgs.(map[string]any)
-			if args == nil {
-				args = map[string]any{}
-			}
+			args, err := ec.renderArgs(task, mergedVars)
 			if err != nil {
-				ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: "args: " + err.Error()})
+				// An args failure inside a LOOP is reported per item,
+				// like any other iteration failure, and the task then
+				// closes with real's own summary line. Measured: that
+				// summary belongs to an args-finalization failure and
+				// NOT to a module failure, which ends on its per-item
+				// lines alone.
+				ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module,
+					Failed: true, Ignored: task.IgnoreErrors, Msg: err.Error(),
+					Item: item, ItemLabel: label, LoopVar: task.LoopVar, Looped: looping,
+					ArgsFailed: true})
 				anyFailed = true
 				aborted = true
+				argsFailed = looping
 				break
 			}
 			if task.Module == "template" {
@@ -1431,7 +1443,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			var derr error
 			result, handled, derr = ec.runDirective(ctx, task, st, args, mergedVars, pr)
 			if derr != nil {
-				ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: derr.Error()})
+				ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: derr.Error()})
 				anyFailed = true
 				aborted = true
 				break
@@ -1452,7 +1464,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				conn, dname, cerr := ec.connectionFor(ctx, task, mergedVars, st)
 				delegate = dname
 				if cerr != nil {
-					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: cerr.Error(), Delegate: delegate})
+					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: cerr.Error(), Delegate: delegate})
 					anyFailed = true
 					aborted = true
 					break
@@ -1480,13 +1492,28 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			}
 
 			resultView := resultToMap(result)
+			// A changed_when:/failed_when: that will not EVALUATE is a
+			// task failure, not something to shrug off. Both errors
+			// were dropped here, so a broken expression left the task
+			// reporting whatever the module said — green, on a
+			// condition that never ran.
 			if task.ChangedWhen != "" {
-				if ok, cerr := ec.evalWhen(task.ChangedWhen, withResult(mergedVars, resultView)); cerr == nil {
+				ok, cerr := ec.evalWhen(task.ChangedWhen, withResult(mergedVars, resultView))
+				if cerr != nil {
+					result.Failed = true
+					result.Msg = conditionalFailure("changed_when", cerr)
+					result = result.WithExtra("changed_when_result", conditionalResultOf(cerr))
+				} else {
 					result.Changed = ok
 				}
 			}
-			if task.FailedWhen != "" {
-				if ok, ferr := ec.evalWhen(task.FailedWhen, withResult(mergedVars, resultView)); ferr == nil {
+			if task.FailedWhen != "" && !result.Failed {
+				ok, ferr := ec.evalWhen(task.FailedWhen, withResult(mergedVars, resultView))
+				if ferr != nil {
+					result.Failed = true
+					result.Msg = conditionalFailure("failed_when", ferr)
+					result = result.WithExtra("failed_when_result", conditionalResultOf(ferr))
+				} else {
 					result.Failed = ok
 				}
 			}
@@ -1687,6 +1714,17 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				st.notify[i] = true
 			}
 		}
+	}
+
+	// Real closes a loop whose arguments would not finalize with one
+	// task-level line after the per-item ones. It does NOT do this for
+	// a loop whose items merely failed in the module — measured both
+	// ways, which is why this keys on argsFailed rather than on
+	// anyFailed.
+	if argsFailed {
+		ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module,
+			Failed: true, Ignored: task.IgnoreErrors, Msg: "One or more items failed",
+			ArgsFailed: true, DisplayOnly: true})
 	}
 
 	return anyFailed && !task.IgnoreErrors
@@ -2666,4 +2704,85 @@ func orderHosts(order []string, mode string) []string {
 		rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
 	}
 	return out
+}
+
+// renderArgs renders a task's arguments ONE TOP-LEVEL KEY AT A TIME,
+// so a failure can say which argument it was — which is what real
+// does, and why its message is useful:
+//
+//	Task failed: Finalization of task args for 'ansible.builtin.copy'
+//	failed: Error while resolving value for 'content': 'nope' is undefined
+//
+// Rendering the whole map in one call, as this did, can only report
+// the innermost error with no idea which argument produced it.
+//
+// Keys are rendered in sorted order so the argument NAMED is the same
+// one on every run: a Go map would otherwise pick whichever failing
+// key it reached first.
+func (ec *execCtx) renderArgs(task Task, vars map[string]any) (map[string]any, error) {
+	raw := task.argsWithDefaults()
+	keys := make([]string, 0, len(raw))
+	for k := range raw {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	args := make(map[string]any, len(raw))
+	for _, k := range keys {
+		// Rendered INSIDE a one-key map rather than on its own: omit
+		// is defined as dropping its containing entry, and a bare
+		// value has no container — RenderValue rightly refuses it.
+		rendered, err := ec.engine.Template.RenderValue(map[string]any{k: raw[k]}, vars)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"Task failed: Finalization of task args for '%s' failed: Error while resolving value for '%s': %w",
+				fqcn(task.Module), k, innermost(err))
+		}
+		one, _ := rendered.(map[string]any)
+		value, present := one[k]
+		if !present {
+			continue // omitted
+		}
+		args[k] = value
+	}
+	return args, nil
+}
+
+// conditionalFailure words a when:/changed_when:/failed_when: failure
+// the way real does.
+func conditionalFailure(keyword string, err error) string {
+	if keyword == "when" {
+		return fmt.Sprintf("Task failed: A 'when' expression failed: Error while evaluating conditional: %v", innermost(err))
+	}
+	return fmt.Sprintf("Task failed: Action failed: A '%s' expression failed: Error while evaluating conditional: %v", keyword, innermost(err))
+}
+
+// fqcn qualifies a module name the way real reports it in an error.
+func fqcn(module string) string {
+	if strings.Contains(module, ".") {
+		return module
+	}
+	return "ansible.builtin." + module
+}
+
+// innermost strips this port's own wrapping off a template error, so
+// the message ends on the part real also prints — "'nope' is
+// undefined" — rather than on three layers of Go context in front of
+// it.
+func innermost(err error) error {
+	msg := err.Error()
+	if i := strings.LastIndex(msg, ": "); i >= 0 {
+		if tail := msg[i+2:]; strings.HasSuffix(tail, "is undefined") {
+			return errors.New(tail)
+		}
+	}
+	return err
+}
+
+// conditionalResultOf is what real puts in changed_when_result /
+// failed_when_result when the expression itself could not be
+// evaluated: the inner reason, without the "Task failed: Action
+// failed:" wrapping that the msg carries.
+func conditionalResultOf(err error) string {
+	return fmt.Sprintf("Error while evaluating conditional: %v", innermost(err))
 }

@@ -308,8 +308,15 @@ func (c *DefaultCallback) resultJSON(r Result) string {
 		return out
 	}
 	fields := map[string]any{
-		"changed": r.Changed,
-		"msg":     r.Msg,
+		"msg": r.Msg,
+	}
+	// Every module's result carries "changed" — except debug's, whose
+	// action plugin never sets it. Measured both ways: a failing
+	// debug's line is {"msg": ...} while command, copy, set_fact and
+	// assert all show {"changed": false, "msg": ...}, and a SUCCEEDING
+	// debug's verbose dump likewise shows msg alone.
+	if modules.NormalizeName(r.Module) != "debug" {
+		fields["changed"] = r.Changed
 	}
 	for k, v := range r.Extra {
 		if strings.HasPrefix(k, "_ansible_") {
@@ -325,7 +332,9 @@ func (c *DefaultCallback) resultJSON(r Result) string {
 	// registered results entry, and NOT in an ok iteration's verbose
 	// dump — which shows msg alone. So they are added here, where a
 	// failure is rendered, rather than to the result itself.
-	if r.Looped {
+	// ...but not when the module never ran: an args-finalization
+	// failure has no result dict to have carried them.
+	if r.Looped && !r.ArgsFailed {
 		fields["item"] = r.Item
 		fields["ansible_loop_var"] = r.LoopVar
 	}
