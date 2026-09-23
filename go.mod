@@ -4,11 +4,11 @@ go 1.26.4
 
 require (
 	github.com/go-ansible/facts v0.1.0
-	github.com/go-ansible/inventory v0.6.0
+	github.com/go-ansible/inventory v0.7.0
 	github.com/go-ansible/modules v0.51.0
 	github.com/go-ansible/template v0.18.0
 	github.com/go-ansible/vars v0.1.2
-	github.com/go-ansible/vault v0.4.0
+	github.com/go-ansible/vault v0.5.0
 	github.com/go-remoteexec/transport v0.1.7
 )
 
