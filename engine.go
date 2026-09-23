@@ -228,7 +228,11 @@ type hostState struct {
 	lastFailedResult map[string]any
 
 	failed bool
-	notify map[string]bool
+	// notify holds the INDICES of the play's handlers this host has
+	// notified, not their names: a notification can reach several
+	// handlers at once through listen:, and two handlers may share a
+	// name.
+	notify map[int]bool
 }
 
 // execCtx bundles one play-batch's mutable execution state: each
@@ -522,7 +526,7 @@ func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Hos
 		vc.SetVar(vars.Inventory, "playbook_dir", e.BaseDir)
 		vc.Set(vars.ExtraVars, e.ExtraVars)
 		vc.Set(vars.PlayVars, play.Vars)
-		ec.states[h.Name] = &hostState{name: h.Name, vc: vc, notify: map[string]bool{}}
+		ec.states[h.Name] = &hostState{name: h.Name, vc: vc, notify: map[int]bool{}}
 		order = append(order, h.Name)
 	}
 	order = orderHosts(order, play.Order)
@@ -1653,7 +1657,9 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 
 	if anyChanged {
 		for _, name := range task.Notify {
-			st.notify[name] = true
+			for _, i := range ec.handlersFor(name) {
+				st.notify[i] = true
+			}
 		}
 	}
 
@@ -1870,15 +1876,15 @@ func (ec *execCtx) runMeta(ctx context.Context, args map[string]any, st *hostSta
 		// it broke playbooks that do nothing.
 		return nil
 	case "flush_handlers":
-		for _, handler := range ec.play.Handlers {
-			if st.notify[handler.Name] {
+		for i, handler := range ec.play.Handlers {
+			if st.notify[i] {
 				// A handler, however it was reached — meta:
 				// flush_handlers banners it the same way the end-of-play
 				// run does.
 				ec.runTaskOnHost(ctx, handler, st, pr, true)
 			}
 		}
-		st.notify = map[string]bool{}
+		st.notify = map[int]bool{}
 		return nil
 	case "clear_facts":
 		st.vc.Set(vars.Facts, map[string]any{})
@@ -2206,12 +2212,51 @@ func (ec *execCtx) report(pr *PlayResult, r Result) {
 	}
 }
 
+// handlersFor resolves a notify: name to the handlers it triggers, as
+// indices into the play's handler list.
+//
+// Two separate matches, both measured against real ansible-core
+// 2.21.4 rather than read off its source — which matters here,
+// because the source comment says "last handler loaded with the same
+// name wins" and RUNNING it shows the FIRST one winning:
+//
+//   - the first handler with that name, and only that one: a second
+//     handler sharing the name never runs;
+//   - then every handler whose listen: carries the name, in
+//     definition order, deduplicated by handler name.
+//
+// Both can fire for one notification: a handler named "overlap" and
+// two others listening to "overlap" all run.
+func (ec *execCtx) handlersFor(name string) []int {
+	var out []int
+	for i, h := range ec.play.Handlers {
+		if h.Name != "" && h.Name == name {
+			out = append(out, i)
+			break
+		}
+	}
+	seen := map[string]bool{}
+	for i, h := range ec.play.Handlers {
+		if !contains(h.Listen, name) {
+			continue
+		}
+		if h.Name != "" {
+			if seen[h.Name] {
+				continue
+			}
+			seen[h.Name] = true
+		}
+		out = append(out, i)
+	}
+	return out
+}
+
 func (ec *execCtx) runHandlers(ctx context.Context, order []string, pr *PlayResult) {
-	for _, handler := range ec.play.Handlers {
+	for i, handler := range ec.play.Handlers {
 		var toRun []string
 		for _, h := range order {
 			st := ec.states[h]
-			if (!st.failed || ec.engine.ForceHandlers) && st.notify[handler.Name] {
+			if (!st.failed || ec.engine.ForceHandlers) && st.notify[i] {
 				toRun = append(toRun, h)
 			}
 		}

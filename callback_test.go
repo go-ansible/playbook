@@ -1045,3 +1045,50 @@ func TestRescueVariablesNotSetByAnIgnoredFailure(t *testing.T) {
 		}
 	}
 }
+
+// TestHandlerListen pins notify-to-handler resolution, MEASURED
+// against real ansible-core 2.21.4. `listen:` was a parse error here,
+// so a role using the standard "notify a topic, several handlers
+// answer" pattern would not load at all.
+//
+// The duplicate-name case is why this was measured rather than read:
+// real's own source comment says "last handler loaded with the same
+// name wins", and running it shows the FIRST one winning.
+func TestHandlerListen(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  handlers:
+    - {name: dup, debug: {msg: FIRST dup}}
+    - {name: dup, debug: {msg: LAST dup}}
+    - {name: overlap, debug: {msg: named overlap}}
+    - {name: x, debug: {msg: x}, listen: overlap}
+    - {name: y, debug: {msg: y}, listen: [overlap, other]}
+    - {debug: {msg: unnamed}, listen: overlap}
+  tasks:
+    - {name: t1, command: "true", changed_when: true, notify: dup}
+    - {name: t2, command: "true", changed_when: true, notify: overlap}
+    - {name: t3, command: "true", changed_when: true, notify: other}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := &recordingCallback{}
+	e := New(localhostInventory())
+	e.Callbacks = []Callback{cb}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	var ran []string
+	for _, r := range cb.results {
+		if r.Handler {
+			ran = append(ran, r.Msg)
+		}
+	}
+	// Definition order, one name match only, every listen match, and
+	// a handler notified twice still runs once.
+	want := []string{"FIRST dup", "named overlap", "x", "y", "unnamed"}
+	if !reflect.DeepEqual(ran, want) {
+		t.Errorf("handlers ran %#v, want %#v", ran, want)
+	}
+}

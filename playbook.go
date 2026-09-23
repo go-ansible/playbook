@@ -163,8 +163,12 @@ type Task struct {
 	Become       *bool // nil means "inherit the play's setting"
 	BecomeUser   string
 	Notify       []string
-	Vars         map[string]any
-	DelegateTo   string
+
+	// Listen are the notify TOPICS this handler answers to, on top of
+	// its own name. Only meaningful on a handler.
+	Listen     []string
+	Vars       map[string]any
+	DelegateTo string
 
 	// Until/Retries/Delay implement the task retry loop: real Ansible
 	// runs the task 1+Retries times (Retries nil, the "unset" state,
@@ -680,7 +684,7 @@ var taskReservedKeys = map[string]bool{
 	"name": true, "when": true, "loop": true, "loop_control": true,
 	"register": true, "ignore_errors": true, "changed_when": true,
 	"failed_when": true, "tags": true, "become": true, "become_user": true,
-	"become_method": true, "notify": true, "vars": true, "delegate_to": true,
+	"become_method": true, "notify": true, "listen": true, "vars": true, "delegate_to": true,
 	"block": true, "rescue": true, "always": true, "with_items": true,
 	"until": true, "retries": true, "delay": true, "run_once": true,
 	"async": true, "poll": true,
@@ -780,6 +784,7 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 		Tags:              toStringList(m["tags"]),
 		BecomeUser:        str(m["become_user"]),
 		Notify:            toStringList(m["notify"]),
+		Listen:            toStringList(m["listen"]),
 		Vars:              toMap(m["vars"]),
 		DelegateTo:        str(m["delegate_to"]),
 		Until:             normalizeWhen(m["until"]),
