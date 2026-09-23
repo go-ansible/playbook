@@ -285,3 +285,61 @@ func TestEngineArgsRenderError(t *testing.T) {
 		t.Fatal("want a render error to fail the task")
 	}
 }
+
+// TestBecomeHostVarsWin pins the precedence MEASURED against real
+// ansible-core 2.21.4, which is the same as connection's and whose
+// middle term is easy to get backwards: HOST VAR > task keyword >
+// play keyword.
+//
+// Both directions were wrong here, and both matter. `ansible_become:
+// false` on a host was ignored, so a task written `become: true`
+// escalated on a host that said not to; and `ansible_become: true`
+// was ignored too, so a task meant to escalate ran unprivileged.
+func TestBecomeHostVarsWin(t *testing.T) {
+	on, off := true, false
+	for _, tc := range []struct {
+		name     string
+		play     Play
+		task     Task
+		hostVars map[string]any
+		wantOn   bool
+		wantUser string
+	}{{
+		name:     "host var enables what no keyword asked for",
+		play:     Play{BecomeUser: "root"},
+		hostVars: map[string]any{"ansible_become": true, "ansible_become_user": "hv"},
+		wantOn:   true, wantUser: "hv",
+	}, {
+		name:     "host var refuses what the task keyword asked for",
+		play:     Play{BecomeUser: "root"},
+		task:     Task{Become: &on, BecomeUser: "kw"},
+		hostVars: map[string]any{"ansible_become": false},
+		wantOn:   false,
+	}, {
+		name:     "host var user beats the task keyword",
+		play:     Play{Become: true, BecomeUser: "root"},
+		task:     Task{BecomeUser: "kw"},
+		hostVars: map[string]any{"ansible_become_user": "hv"},
+		wantOn:   true, wantUser: "hv",
+	}, {
+		// With no host var in play, the keywords still rank as before.
+		name:   "task keyword beats the play",
+		play:   Play{Become: true, BecomeUser: "root"},
+		task:   Task{BecomeUser: "kw"},
+		wantOn: true, wantUser: "kw",
+	}, {
+		name: "task keyword can still turn it off",
+		play: Play{Become: true, BecomeUser: "root"},
+		task: Task{Become: &off},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, ok := becomeConfigFor(tc.play, tc.task, tc.hostVars)
+			if ok != tc.wantOn {
+				t.Fatalf("enabled = %v, want %v", ok, tc.wantOn)
+			}
+			if ok && cfg.User != tc.wantUser {
+				t.Errorf("user = %q, want %q", cfg.User, tc.wantUser)
+			}
+		})
+	}
+}

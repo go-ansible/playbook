@@ -1665,6 +1665,12 @@ func (ec *execCtx) connectionFor(ctx context.Context, task Task, mergedVars map[
 		conn = dconn
 	}
 	if becomeCfg, ok := becomeConfigFor(ec.play, task, mergedVars); ok {
+		// become_user is templated, as it is there: `become_user:
+		// "{{ deploy_user }}"` reached sudo as the literal braces here,
+		// so the escalation failed with "unknown user {{ ... }}".
+		if rendered, rerr := ec.engine.Template.Render(becomeCfg.User, mergedVars); rerr == nil {
+			becomeCfg.User = rendered
+		}
 		conn = remoteexec.Become(conn, becomeCfg)
 	}
 	return conn, delegate, nil
