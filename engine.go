@@ -1251,6 +1251,7 @@ func (ec *execCtx) runAsyncTask(ctx context.Context, task Task, conn remoteexec.
 // runTaskOnHost runs task on one host (once per loop item, if looping)
 // and reports whether the host should be excluded from the rest of the
 // play (a failure not covered by ignore_errors).
+
 func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, pr *PlayResult, isHandler bool) bool {
 	// Noted here rather than at each of the six places a task can
 	// fail, so ec.report can attribute ANY failure to the task that
@@ -1368,7 +1369,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			if task.When != "" {
 				ok, werr := ec.evalWhen(task.When, iter.Merged())
 				if werr != nil {
-					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: "when: " + werr.Error(), Item: item, ItemLabel: label, Looped: true})
+					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: "when: " + werr.Error(), Item: item, ItemLabel: label, LoopVar: task.LoopVar, Looped: true})
 					anyFailed = true
 					if !task.IgnoreErrors {
 						break
@@ -1376,7 +1377,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 					continue
 				}
 				if !ok {
-					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Skipped: true, Item: item, ItemLabel: label, Looped: true})
+					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Skipped: true, Item: item, ItemLabel: label, LoopVar: task.LoopVar, Looped: true})
 					continue
 				}
 			}
@@ -1609,7 +1610,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			Handler:  isHandler,
 			Role:     roleName(task),
 			NoLog:    task.NoLog,
-			Item:     item, ItemLabel: label,
+			Item:     item, ItemLabel: label, LoopVar: task.LoopVar,
 			Looped: looping,
 		})
 

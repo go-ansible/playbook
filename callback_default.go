@@ -57,6 +57,12 @@ type DefaultCallback struct {
 	// interleave mid-write.
 	mu       sync.Mutex
 	lastTask string
+
+	// pendingIgnore defers the "...ignoring" line of a LOOPED task
+	// until the task ends. Real prints it once after every item, not
+	// once per failing item — which only shows up on a loop where more
+	// than one item fails.
+	pendingIgnore bool
 }
 
 // NewDefaultCallback returns a DefaultCallback writing to w, with ANSI
@@ -88,6 +94,8 @@ func (c *DefaultCallback) countField(lead string, n int, code string) string {
 func (c *DefaultCallback) OnPlayStart(play Play, hosts []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	c.flushPendingIgnore()
 
 	// An unnamed play is named after its hosts pattern, which is what
 	// real Ansible's Play.get_name() falls back to — measured: a play
@@ -156,11 +164,25 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 			kind, code = "UNREACHABLE!", colorBrightRed
 		}
 		line := fmt.Sprintf("fatal: [%s]: %s => %s", hostLabel(r), kind, c.resultJSON(r))
+		if r.Looped {
+			// A failing ITEM is reported differently from a failing
+			// task: lowercase "failed:", no FAILED! marker, and the
+			// item label BEFORE the arrow rather than after it —
+			// "failed: [h1] (item=a) => {...}" against an ok line's
+			// "ok: [h1] => (item=a)". Measured, both of them.
+			line = fmt.Sprintf("failed: [%s]%s => %s", hostLabel(r), itemLabelBare(r), c.resultJSON(r))
+		}
 		fmt.Fprintln(c.w, c.colorize(code, line))
 		if r.Ignored {
 			// Real Ansible says so, on its own line, so a red line that
 			// did not stop the run is not mistaken for one that did.
-			fmt.Fprintln(c.w, c.colorize(colorCyan, "...ignoring"))
+			// On a LOOP it says it once, after the last item, which is
+			// why this is deferred rather than printed here.
+			if r.Looped {
+				c.pendingIgnore = true
+			} else {
+				fmt.Fprintln(c.w, c.colorize(colorCyan, "...ignoring"))
+			}
 		}
 	case r.Skipped:
 		fmt.Fprintln(c.w, c.colorize(colorCyan, fmt.Sprintf("skipping: [%s]%s", r.Host, skippedItemLabel(r))))
@@ -190,6 +212,7 @@ func (c *DefaultCallback) taskBanner(r Result) {
 	// The kind is part of the identity: a handler that shares a task's
 	// name still gets its own banner.
 	if key := kind + " [" + banner + "]"; key != c.lastTask {
+		c.flushPendingIgnore()
 		fmt.Fprintf(c.w, "\n%s\n", c.colorize(colorCyan, key))
 		c.lastTask = key
 	}
@@ -213,6 +236,8 @@ func (c *DefaultCallback) OnTaskRetry(r Result, left int) {
 func (c *DefaultCallback) OnStats(rr *RunResult) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	c.flushPendingIgnore()
 
 	fmt.Fprintln(c.w)
 	fmt.Fprintln(c.w, c.colorize(colorCyan, "PLAY RECAP"))
@@ -294,6 +319,15 @@ func (c *DefaultCallback) resultJSON(r Result) string {
 	}
 	if r.Unreachable {
 		fields["unreachable"] = true
+	}
+	// An ITERATION's printed result names which item it was. Measured:
+	// these two keys appear on a failing item's line and in the
+	// registered results entry, and NOT in an ok iteration's verbose
+	// dump — which shows msg alone. So they are added here, where a
+	// failure is rendered, rather than to the result itself.
+	if r.Looped {
+		fields["item"] = r.Item
+		fields["ansible_loop_var"] = r.LoopVar
 	}
 	// A result carrying _ansible_verbose_always is INDENTED here too,
 	// not just on an ok line — real Ansible's _dump_results makes that
@@ -381,6 +415,28 @@ func itemLabel(r Result) string {
 		shown = r.ItemLabel
 	}
 	return " => (item=" + template.PythonStr(shown) + ")"
+}
+
+// itemLabelBare is the "(item=...)" without the " => " an ok line
+// puts in front of it, because a FAILED item's line places the label
+// before the arrow instead: "failed: [h1] (item=a) => {...}".
+func itemLabelBare(r Result) string {
+	if label := itemLabel(r); label != "" {
+		return strings.TrimPrefix(label, " =>")
+	}
+	return ""
+}
+
+// flushPendingIgnore prints the "...ignoring" a looped task owes,
+// which real emits once after the last item rather than after each
+// failing one. Called wherever a task can END: a new banner, the
+// recap, and the start of another play.
+func (c *DefaultCallback) flushPendingIgnore() {
+	if !c.pendingIgnore {
+		return
+	}
+	c.pendingIgnore = false
+	fmt.Fprintln(c.w, c.colorize(colorCyan, "...ignoring"))
 }
 
 // skippedItemLabel is itemLabel plus the TRAILING SPACE real Ansible

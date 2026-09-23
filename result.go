@@ -16,6 +16,11 @@ type Result struct {
 	Failed  bool
 	Skipped bool
 
+	// LoopVar is the name the loop bound its item to — "item" unless
+	// loop_control.loop_var said otherwise. A failing iteration's
+	// printed result carries it, as ansible_loop_var.
+	LoopVar string
+
 	// ItemLabel is what a looping task prints in its `(item=...)`:
 	// loop_control.label when the task set one, and the item itself
 	// otherwise. Kept apart from Item because Item is what register:
