@@ -160,7 +160,13 @@ type Task struct {
 	// LoopPause is loop_control.pause — seconds to wait between
 	// iterations. Reported in ansible_failed_task, where real carries
 	// it as a float.
-	LoopPause    float64
+	LoopPause float64
+
+	// LoopLabel is loop_control.label — what real prints in the
+	// `(item=...)` of each iteration INSTEAD of the item itself, so a
+	// loop over big dicts stays readable. It is a template, rendered
+	// per item.
+	LoopLabel    string
 	Register     string
 	IgnoreErrors bool
 	ChangedWhen  string
@@ -884,6 +890,7 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 			t.IndexVar = iv
 		}
 		t.LoopPause = floatDefault(lc["pause"], 0)
+		t.LoopLabel = str(lc["label"])
 	}
 	if v, ok := m["become"]; ok {
 		b := boolDefault(v, false)
