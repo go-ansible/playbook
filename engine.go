@@ -728,7 +728,7 @@ func (ec *execCtx) applySafetyLimits(task Task, active []string, pr *PlayResult)
 	// A task's own any_errors_fatal overrides the play's. run_once
 	// implies it: real Ansible treats a failing run_once task as
 	// fatal for everyone, since the one host stood in for all of them.
-	fatal := ec.play.AnyErrorsFatal || task.AnyErrorsFatal || task.RunOnce
+	fatal := ec.play.AnyErrorsFatal || task.AnyErrorsFatal || isRunOnce(task)
 
 	overLimit := false
 	if pct := ec.play.MaxFailPercentage; pct != nil && len(ec.states) > 0 {
@@ -986,7 +986,7 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 	// here (see runFree), so this is a no-op there — see Task.RunOnce.
 	runOn := active
 	var passthrough []string
-	if task.RunOnce && len(active) > 1 {
+	if isRunOnce(task) && len(active) > 1 {
 		runOn = active[:1]
 		passthrough = active[1:]
 	}
@@ -1972,6 +1972,48 @@ func resolvedConnection(play Play, hostVars map[string]any) string {
 	return "ansible.builtin." + modules.NormalizeName(name)
 }
 
+// The helpers below exist because real reports an UNSET optional
+// attribute as null, where Go's zero value is "" or false. That
+// difference ran through ansible_failed_task on every key a playbook
+// had not written.
+func nilIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func nilIfNoStrings(v []string) any {
+	if len(v) == 0 {
+		return nil
+	}
+	return v
+}
+
+func boolPtrOrNil(p *bool) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+// registerDict is real's own shape for a register:, which is not the
+// name but a map of it to an internal sentinel — {"r":
+// "_task.polymorphic_result"}. Reproduced rather than simplified,
+// because the point of this dict is to read like real's.
+func registerDict(name string) any {
+	if name == "" {
+		return nil
+	}
+	return map[string]any{name: "_task.polymorphic_result"}
+}
+
+// isRunOnce reads the tri-state RunOnce as the boolean the engine
+// needs. nil — the playbook never mentioned it — is false here and
+// null in ansible_failed_task, which is the only place the
+// distinction shows.
+func isRunOnce(t Task) bool { return t.RunOnce != nil && *t.RunOnce }
+
 func becomeOf(t Task, play Play) bool {
 	if t.Become != nil {
 		return *t.Become
@@ -2086,21 +2128,26 @@ func failedTaskDict(t Task, play Play, connection string) map[string]any {
 		"args":             args,
 		"any_errors_fatal": t.AnyErrorsFatal,
 		"async":            t.Async,
-		"become_user":      t.BecomeUser,
+		"become_user":      nilIfEmpty(t.BecomeUser),
 		"changed_when":     asList(t.ChangedWhen),
 		"delay":            t.Delay,
-		"delegate_to":      t.DelegateTo,
+		"delegate_to":      nilIfEmpty(t.DelegateTo),
 		"failed_when":      asList(t.FailedWhen),
 		"ignore_errors":    t.IgnoreErrors,
 		"loop":             t.Loop,
 		"loop_control": map[string]any{
-			"loop_var":  t.LoopVar,
-			"index_var": t.IndexVar,
+			"break_when":        []any{},
+			"extended":          nil,
+			"extended_allitems": true,
+			"index_var":         nilIfEmpty(t.IndexVar),
+			"label":             nil,
+			"loop_var":          t.LoopVar,
+			"pause":             t.LoopPause,
 		},
 		"no_log":   t.NoLog,
-		"notify":   t.Notify,
-		"register": t.Register,
-		"run_once": t.RunOnce,
+		"notify":   nilIfNoStrings(t.Notify),
+		"register": registerDict(t.Register),
+		"run_once": boolPtrOrNil(t.RunOnce),
 		"tags":     t.Tags,
 		"until":    asList(t.Until),
 		"vars":     t.Vars,

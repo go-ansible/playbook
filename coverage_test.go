@@ -3,6 +3,7 @@ package playbook
 import (
 	"context"
 	"io"
+	"reflect"
 	"testing"
 
 	remoteexec "github.com/go-remoteexec/transport"
@@ -341,5 +342,49 @@ func TestBecomeHostVarsWin(t *testing.T) {
 				t.Errorf("user = %q, want %q", cfg.User, tc.wantUser)
 			}
 		})
+	}
+}
+
+// TestFailedTaskDictShapes pins the VALUE shapes of
+// ansible_failed_task, not just its key set. Comparing keys was not
+// comparing values: the keys matched while 23 lines of the dump
+// differed, because real reports an UNSET optional attribute as null
+// where Go's zero value is "" or false.
+//
+// Every expectation was read off real ansible-core 2.21.4's own dump.
+func TestFailedTaskDictShapes(t *testing.T) {
+	play := Play{BecomeMethod: "sudo"}
+
+	bare := failedTaskDict(Task{Name: "bare", Module: "command", LoopVar: "item"}, play, "ansible.builtin.local")
+	for _, k := range []string{"become_user", "delegate_to", "notify", "register", "run_once"} {
+		if bare[k] != nil {
+			t.Errorf("unset %s = %#v, want nil", k, bare[k])
+		}
+	}
+	lc, _ := bare["loop_control"].(map[string]any)
+	if lc == nil || lc["loop_var"] != "item" || lc["index_var"] != nil ||
+		lc["label"] != nil || lc["extended_allitems"] != true || lc["pause"] != 0.0 {
+		t.Errorf("loop_control = %#v", bare["loop_control"])
+	}
+
+	// run_once is tri-state there: null when the playbook never said
+	// it, false when it wrote false.
+	no := false
+	if got := failedTaskDict(Task{RunOnce: &no}, play, "")["run_once"]; got != false {
+		t.Errorf("explicit run_once: false = %#v, want false (not nil)", got)
+	}
+
+	// register is not the name but real's own map-to-sentinel shape.
+	set := failedTaskDict(Task{Register: "r", BecomeUser: "deploy", DelegateTo: "h2",
+		Notify: []string{"h"}, LoopPause: 1}, play, "")
+	want := map[string]any{"r": "_task.polymorphic_result"}
+	if !reflect.DeepEqual(set["register"], want) {
+		t.Errorf("register = %#v, want %#v", set["register"], want)
+	}
+	if set["become_user"] != "deploy" || set["delegate_to"] != "h2" {
+		t.Errorf("set values = %#v / %#v", set["become_user"], set["delegate_to"])
+	}
+	if lc2, _ := set["loop_control"].(map[string]any); lc2["pause"] != 1.0 {
+		t.Errorf("pause = %#v, want 1.0", set["loop_control"])
 	}
 }

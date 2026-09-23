@@ -143,13 +143,18 @@ type RoleRef struct {
 // task's YAML mapping carried (e.g. `copy:` or `command:`) — empty for
 // a block/meta task.
 type Task struct {
-	Name         string
-	Module       string
-	Args         map[string]any
-	When         string // Jinja2 expression, already normalized from a string or []string
-	Loop         any    // a literal list, or a "{{ expr }}" string rendered at run time
-	LoopVar      string // default "item"
-	IndexVar     string // loop_control.index_var — unset means no index variable
+	Name     string
+	Module   string
+	Args     map[string]any
+	When     string // Jinja2 expression, already normalized from a string or []string
+	Loop     any    // a literal list, or a "{{ expr }}" string rendered at run time
+	LoopVar  string // default "item"
+	IndexVar string // loop_control.index_var — unset means no index variable
+
+	// LoopPause is loop_control.pause — seconds to wait between
+	// iterations. Reported in ansible_failed_task, where real carries
+	// it as a float.
+	LoopPause    float64
 	Register     string
 	IgnoreErrors bool
 	ChangedWhen  string
@@ -188,7 +193,10 @@ type Task struct {
 	// coordinates run_once across free's independent per-host lanes;
 	// this port does not, and says so here rather than silently
 	// re-running the task on every host without comment.
-	RunOnce bool
+	// RunOnce is tri-state, as it is there: nil means the playbook
+	// never mentioned it, which ansible_failed_task reports as null
+	// rather than false.
+	RunOnce *bool
 
 	// Async/Poll implement async:/poll: — see runTaskOnHost's async
 	// branch and modules.AsyncLaunch/AsyncCheck for the real mechanism
@@ -776,13 +784,16 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 		DelegateTo:        str(m["delegate_to"]),
 		Until:             normalizeWhen(m["until"]),
 		Delay:             floatDefault(m["delay"], 5),
-		RunOnce:           boolDefault(m["run_once"], false),
 		NoLog:             boolDefault(m["no_log"], false),
 		Environment:       toMap(m["environment"]),
 		AnyErrorsFatal:    boolDefault(m["any_errors_fatal"], false),
 		CheckMode:         toBoolPtr(m["check_mode"]),
 		IgnoreUnreachable: toBoolPtr(m["ignore_unreachable"]),
 		Async:             toInt(m["async"]),
+	}
+	if v, ok := m["run_once"]; ok {
+		b := boolDefault(v, false)
+		t.RunOnce = &b
 	}
 	var mdErr error
 	if t.ModuleDefaults, mdErr = toModuleDefaults(m["module_defaults"]); mdErr != nil {
@@ -803,6 +814,7 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 		if iv := str(lc["index_var"]); iv != "" {
 			t.IndexVar = iv
 		}
+		t.LoopPause = floatDefault(lc["pause"], 0)
 	}
 	if v, ok := m["become"]; ok {
 		b := boolDefault(v, false)
