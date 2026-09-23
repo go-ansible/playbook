@@ -1221,3 +1221,54 @@ func TestLoopControlLabel(t *testing.T) {
 		t.Errorf("the labelled iteration leaked the item it was labelling:\n%s", out)
 	}
 }
+
+// TestLoopedFailureLines pins how a failing ITERATION is reported,
+// which is not how a failing task is. Measured against real
+// ansible-core 2.21.4:
+//
+//	failed: [h1] (item=a) => {...}     an item
+//	fatal: [h1]: FAILED! => {...}      a task
+//
+// Lowercase, no FAILED! marker, and the label BEFORE the arrow rather
+// than after it — an ok line puts it after. The JSON names which item
+// it was, through "item" and "ansible_loop_var".
+//
+// And "...ignoring" comes ONCE after the last item, not after each
+// failing one, which only shows up when more than one item fails.
+func TestLoopedFailureLines(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - {name: both fail, fail: {msg: "boom {{ item }}"}, loop: [a, b], ignore_errors: true}
+    - {name: after, debug: {msg: done}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	e := New(localhostInventory())
+	e.Callbacks = []Callback{NewDefaultCallback(&buf, false)}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		`failed: [localhost] (item=a) => {"ansible_loop_var": "item", "changed": false, "item": "a", "msg": "boom a"}`,
+		`failed: [localhost] (item=b) => {"ansible_loop_var": "item", "changed": false, "item": "b", "msg": "boom b"}`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing:\n  %s\ngot:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "FAILED!") {
+		t.Errorf("an ITEM should not carry the task-level FAILED! marker:\n%s", out)
+	}
+	if n := strings.Count(out, "...ignoring"); n != 1 {
+		t.Errorf(`"...ignoring" appeared %d times, want 1 — once after the last item:\n%s`, n, out)
+	}
+	// And it lands before the next task's banner, not after it.
+	if i, j := strings.Index(out, "...ignoring"), strings.Index(out, "TASK [after]"); i < 0 || j < 0 || i > j {
+		t.Errorf("...ignoring (%d) should come before the next banner (%d):\n%s", i, j, out)
+	}
+}
