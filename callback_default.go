@@ -181,6 +181,11 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 			if r.Looped {
 				c.pendingIgnore = true
 			} else {
+				// This line ends the task, so any "...ignoring" its
+				// ITEMS were owed is this one — printing both said it
+				// twice for a loop that closed with a task-level
+				// summary.
+				c.pendingIgnore = false
 				fmt.Fprintln(c.w, c.colorize(colorCyan, "...ignoring"))
 			}
 		}
