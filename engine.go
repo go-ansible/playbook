@@ -1312,6 +1312,19 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		} else {
 			items = []any{rendered}
 		}
+		// with_<name>: the rendered value supplies the lookup's TERMS
+		// — a list spreads into several (with_nested: [[1,2],[a,b]]
+		// is two terms), anything else is one (with_dict: "{{ d }}").
+		// The plugin then produces the items to loop over.
+		if task.LoopWith != "" {
+			produced, lerr := ec.engine.Template.Lookup(task.LoopWith, items, scope.Merged(), nil)
+			if lerr != nil {
+				ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true,
+					Msg: "with_" + task.LoopWith + ": " + lerr.Error()})
+				return !task.IgnoreErrors
+			}
+			items = produced
+		}
 	}
 
 	anyChanged, anyFailed := false, false

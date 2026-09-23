@@ -1092,3 +1092,88 @@ func TestHandlerListen(t *testing.T) {
 		t.Errorf("handlers ran %#v, want %#v", ran, want)
 	}
 }
+
+// TestWithForms pins the with_<name>: family, which real resolves as
+// the <name> LOOKUP PLUGIN with wantlist forced on — with_dict is the
+// dict lookup. Only with_items existed here; every other form was
+// taken for a module ("ambiguous module: both debug and with_dict
+// present"), so the task would not even parse.
+func TestWithForms(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  vars:
+    d: {alpha: 1, beta: 2}
+    people:
+      - {name: alice, groups: [wheel, dev]}
+  tasks:
+    - {name: items, debug: {msg: "{{ item }}"}, with_items: [1, 2]}
+    - {name: dict, debug: {msg: "{{ item.key }}={{ item.value }}"}, with_dict: "{{ d }}"}
+    - {name: nested, debug: {msg: "{{ item[0] }}{{ item[1] }}"}, with_nested: [[1,2],['a','b']]}
+    - {name: sequence, debug: {msg: "{{ item }}"}, with_sequence: start=1 end=3}
+    - {name: indexed, debug: {msg: "{{ item[0] }}:{{ item[1] }}"}, with_indexed_items: ['x','y']}
+    - {name: subelements, debug: {msg: "{{ item[0].name }}/{{ item[1] }}"}, with_subelements: ["{{ people }}", groups]}
+    - {name: flattened, debug: {msg: "{{ item }}"}, with_flattened: [[1,[2]], 3]}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := &recordingCallback{}
+	e := New(localhostInventory())
+	e.Callbacks = []Callback{cb}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][]string{}
+	for _, r := range cb.results {
+		got[r.Task] = append(got[r.Task], r.Msg)
+	}
+	for _, tc := range []struct {
+		task string
+		want []string
+	}{
+		{"items", []string{"1", "2"}},
+		{"dict", []string{"alpha=1", "beta=2"}},
+		{"nested", []string{"1a", "1b", "2a", "2b"}},
+		// Strings, not integers — the sequence lookup's own contract.
+		{"sequence", []string{"1", "2", "3"}},
+		{"indexed", []string{"0:x", "1:y"}},
+		// The parent arrives without the key its elements came from.
+		{"subelements", []string{"alice/wheel", "alice/dev"}},
+		{"flattened", []string{"1", "2", "3"}},
+	} {
+		if !reflect.DeepEqual(got[tc.task], tc.want) {
+			t.Errorf("%s: %#v, want %#v", tc.task, got[tc.task], tc.want)
+		}
+	}
+}
+
+// TestWithFormsDoNotShadowAModule: the with_ prefix is only special
+// when a lookup plugin of that name exists, so a module called
+// with_something stays a module.
+func TestWithFormsDoNotShadowAModule(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  tasks:
+    - {name: t, with_nosuchlookup: {a: 1}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := pb[0].Tasks[0].Module; got != "with_nosuchlookup" {
+		t.Errorf("module = %q, want it taken as a module name", got)
+	}
+}
+
+// TestLoopAndWithAreExclusive — real refuses both on one task, and so
+// does this rather than silently picking one.
+func TestLoopAndWithAreExclusive(t *testing.T) {
+	_, err := Parse([]byte(`
+- hosts: all
+  tasks:
+    - {name: t, debug: {}, loop: [1], with_items: [2]}
+`))
+	if err == nil || !strings.Contains(err.Error(), "with_items") {
+		t.Errorf("err = %v, want one naming the conflict", err)
+	}
+}

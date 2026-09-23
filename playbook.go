@@ -8,6 +8,7 @@ package playbook
 import (
 	"errors"
 	"fmt"
+	"github.com/go-ansible/template"
 	"github.com/go-ansible/vault"
 	"os"
 	"path/filepath"
@@ -143,11 +144,16 @@ type RoleRef struct {
 // task's YAML mapping carried (e.g. `copy:` or `command:`) — empty for
 // a block/meta task.
 type Task struct {
-	Name     string
-	Module   string
-	Args     map[string]any
-	When     string // Jinja2 expression, already normalized from a string or []string
-	Loop     any    // a literal list, or a "{{ expr }}" string rendered at run time
+	Name   string
+	Module string
+	Args   map[string]any
+	When   string // Jinja2 expression, already normalized from a string or []string
+	Loop   any    // a literal list, or a "{{ expr }}" string rendered at run time
+
+	// LoopWith names the lookup plugin a with_<name>: key asked for,
+	// empty for a plain loop:. Real routes both through the same
+	// place — with_items IS the items lookup — and so does this.
+	LoopWith string
 	LoopVar  string // default "item"
 	IndexVar string // loop_control.index_var — unset means no index variable
 
@@ -833,7 +839,7 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 	t := Task{
 		Name:              str(m["name"]),
 		When:              normalizeWhen(m["when"]),
-		Loop:              firstNonNil(m["loop"], m["with_items"]),
+		Loop:              m["loop"],
 		LoopVar:           "item",
 		Register:          str(m["register"]),
 		IgnoreErrors:      boolDefault(m["ignore_errors"], false),
@@ -927,6 +933,22 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 		}
 	}
 
+	// with_<name>: is the <name> lookup plugin, wantlist forced on —
+	// with_items is the items lookup, with_dict the dict one, and so
+	// on. Recognised by asking the template engine whether such a
+	// plugin exists, so a module whose name merely begins with
+	// "with_" is still a module.
+	for k, v := range m {
+		name, ok := strings.CutPrefix(k, "with_")
+		if !ok || !lookupNameExists(name) {
+			continue
+		}
+		if t.Loop != nil {
+			return t, fmt.Errorf("task %q: both loop: and %s: present", t.Name, k)
+		}
+		t.Loop, t.LoopWith = v, name
+	}
+
 	// action:/local_action: name the module INSIDE their value rather
 	// than as their own key. local_action is exactly action plus
 	// delegate_to: localhost — measured: its results banner
@@ -951,6 +973,9 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 	for k := range m {
 		if taskReservedKeys[k] || includeReservedKeys[k] {
 			continue
+		}
+		if name, ok := strings.CutPrefix(k, "with_"); ok && lookupNameExists(name) {
+			continue // handled above, as a loop
 		}
 		// A real Ansible keyword this port does not honour is named as
 		// such. Without this it would be taken for the module.
@@ -1593,3 +1618,12 @@ func toBoolPtr(v any) *bool {
 	}
 	return &b
 }
+
+// lookupProbe answers "is there a lookup plugin of this name?" at
+// parse time, so `with_<name>` is recognised from the plugin set
+// itself rather than from a list kept in step by hand. One engine for
+// the package: it is asked nothing but the question above, and
+// building one per task to ask it would be waste.
+var lookupProbe = template.New()
+
+func lookupNameExists(name string) bool { return name != "" && lookupProbe.HasLookup(name) }

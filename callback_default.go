@@ -373,7 +373,10 @@ func itemLabel(r Result) string {
 	if r.NoLog {
 		return " => (item=(censored due to no_log))"
 	}
-	return fmt.Sprintf(" => (item=%v)", r.Item)
+	// Python's str(), not Go's %v: real labels a dict item
+	// {'k': 'v'} where %v gave map[k:v], and a nil None where %v gave
+	// <nil>. Every loop over anything but a scalar diverged.
+	return " => (item=" + template.PythonStr(r.Item) + ")"
 }
 
 // skippedItemLabel is itemLabel plus the TRAILING SPACE real Ansible
