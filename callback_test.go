@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -228,7 +229,9 @@ func TestCallbackSeesConnectAndFactsResults(t *testing.T) {
 	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
 		t.Fatal(err)
 	}
-	if got := cb.tasks(); len(got) != 2 || got[0] != "(gather_facts)" || got[1] != "speak" {
+	// "Gathering Facts" is real Ansible's own banner for the implicit
+	// fact-gathering step; this port used to call it "(gather_facts)".
+	if got := cb.tasks(); len(got) != 2 || got[0] != "Gathering Facts" || got[1] != "speak" {
 		t.Fatalf("results = %#v, want the gather_facts result followed by the task's", got)
 	}
 
@@ -243,12 +246,16 @@ func TestCallbackSeesConnectAndFactsResults(t *testing.T) {
 	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
 		t.Fatal(err)
 	}
+	// A connect failure is no longer a pseudo-task of its own: real
+	// Ansible connects per task, so it surfaces under the first task
+	// that needs a connection — here the implicit "Gathering Facts".
 	got := cb.tasks()
-	if len(got) != 1 || got[0] != "(connect)" {
+	if len(got) != 1 || got[0] != "Gathering Facts" {
 		t.Fatalf("results = %#v, want just the connect failure", got)
 	}
-	if !cb.results[0].Failed || !strings.Contains(cb.results[0].Msg, "no route to host") {
-		t.Errorf("connect result = %#v, want a failure carrying the dial error", cb.results[0])
+	if !cb.results[0].Failed || !cb.results[0].Unreachable ||
+		!strings.Contains(cb.results[0].Msg, "no route to host") {
+		t.Errorf("connect result = %#v, want an unreachable failure carrying the dial error", cb.results[0])
 	}
 }
 
@@ -698,5 +705,126 @@ func TestDefaultCallbackRecapColors(t *testing.T) {
 				t.Errorf("recap =\n%q\nwant\n%q", line, tc.want+"\n")
 			}
 		})
+	}
+}
+
+// TestIgnoreUnreachableKeepsTheHost pins the semantics MEASURED against
+// real ansible-core 2.21.4: an unreachable host whose task said to
+// ignore it stays in the play, the NEXT task tries to connect again,
+// and the recap files it under ok+ignored rather than unreachable.
+//
+// The decision is per TASK, which is what makes an ignored-unreachable
+// ping followed by an ordinary command report UNREACHABLE twice and
+// drop the host only on the second — and a `debug` between them run
+// normally, since real never touches the connection for one.
+func TestIgnoreUnreachableKeepsTheHost(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - {name: dead, command: "true", ignore_unreachable: true}
+    - {name: no connection needed, debug: {msg: hi}}
+    - {name: needs one, command: "true"}
+    - {name: never reached, debug: {msg: nope}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := &recordingCallback{}
+	e := New(localhostInventory())
+	e.Callbacks = []Callback{cb}
+	e.Connect = func(context.Context, string, map[string]any) (remoteexec.Connection, error) {
+		return nil, errors.New("no route to host")
+	}
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"dead", "no connection needed", "needs one"}
+	if got := cb.tasks(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("tasks = %#v, want %#v — the ignored one carries on, the second unreachable drops the host", got, want)
+	}
+	if r := cb.results[0]; !r.Unreachable || !r.Ignored {
+		t.Errorf("first result = %#v, want unreachable AND ignored", r)
+	}
+	if r := cb.results[2]; !r.Unreachable || r.Ignored {
+		t.Errorf("third result = %#v, want unreachable and NOT ignored", r)
+	}
+	s := rr.Summary()["localhost"]
+	if s == nil || s.Unreachable != 1 || s.Ignored != 1 || s.Ok != 2 {
+		t.Errorf("summary = %+v, want unreachable=1 ignored=1 ok=2", s)
+	}
+	// Unreachable is what real's exit code keys on, separately from
+	// Failed, and it wins over it.
+	if !rr.Unreachable() {
+		t.Error("Unreachable() = false, want true")
+	}
+}
+
+// TestIgnoreUnreachableOnThePlay: the play-level keyword covers every
+// task including the implicit "Gathering Facts", and a play that
+// ignores every unreachable host reports unreachable=0 and is not a
+// failure at all. Measured on 2.21.4 (exit 0, ok=4 ignored=2).
+func TestIgnoreUnreachableOnThePlay(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  ignore_unreachable: true
+  tasks:
+    - {name: t, debug: {msg: hi}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := &recordingCallback{}
+	e := New(localhostInventory())
+	e.Callbacks = []Callback{cb}
+	e.Connect = func(context.Context, string, map[string]any) (remoteexec.Connection, error) {
+		return nil, errors.New("no route to host")
+	}
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Gathering Facts", "t"}
+	if got := cb.tasks(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("tasks = %#v, want %#v", got, want)
+	}
+	if !cb.results[0].Ignored {
+		t.Error("the implicit gather step should inherit the play's ignore_unreachable")
+	}
+	if rr.Failed() || rr.Unreachable() {
+		t.Error("a play that ignores every unreachable host is not a failed run")
+	}
+}
+
+// TestMetaBannersWithoutAResult: real Ansible's meta: fires the
+// task-start callback and NO runner callback, so it prints a TASK
+// header with nothing under it and counts toward nothing in the recap.
+// This port reported an ok line for it and failed outright on
+// meta: noop.
+func TestMetaBannersWithoutAResult(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - {name: nothing, meta: noop}
+    - {name: real work, debug: {msg: hi}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	e := New(localhostInventory())
+	e.Callbacks = []Callback{NewDefaultCallback(&buf, false)}
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "\nTASK [nothing]\n\nTASK [real work]\n"; !strings.Contains(buf.String(), want) {
+		t.Errorf("output =\n%q\nwant it to contain %q", buf.String(), want)
+	}
+	if s := rr.Summary()["localhost"]; s == nil || s.Ok != 1 {
+		t.Errorf("summary = %+v, want ok=1 — meta counts toward nothing", s)
 	}
 }
