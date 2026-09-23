@@ -1864,7 +1864,7 @@ func (ec *execCtx) runAssert(args map[string]any, st *hostState) (modules.Result
 	for _, cond := range conditions {
 		truthy, err := ec.evalCondition(cond, vars)
 		if err != nil {
-			return modules.Fail(fmt.Sprintf("assert: %v", err)), nil
+			return modules.Fail(conditionalFailure("", err)), nil
 		}
 		if truthy {
 			continue
@@ -2729,6 +2729,15 @@ func (ec *execCtx) renderArgs(task Task, vars map[string]any) (map[string]any, e
 
 	args := make(map[string]any, len(raw))
 	for _, k := range keys {
+		if isConditionalArg(task.Module, k) {
+			// A conditional is not templated on its way in: it is an
+			// EXPRESSION, evaluated later with the delimiter rules
+			// when: has. Rendering it first turned an undefined name
+			// into an args-finalization failure, where real reports
+			// "Error while evaluating conditional".
+			args[k] = raw[k]
+			continue
+		}
 		// Rendered INSIDE a one-key map rather than on its own: omit
 		// is defined as dropping its containing entry, and a bare
 		// value has no container — RenderValue rightly refuses it.
@@ -2751,6 +2760,21 @@ func (ec *execCtx) renderArgs(task Task, vars map[string]any) (map[string]any, e
 // conditionalFailure words a when:/changed_when:/failed_when: failure
 // the way real does.
 func conditionalFailure(keyword string, err error) string {
+	// A conditional carrying {{ }} inside a larger expression is a
+	// SYNTAX error there, with its own sentence — measured:
+	// `that: "{{ n }} == 2"` is refused, while `that: "{{ n }}"`
+	// (the whole thing) is the bare-template form and merely
+	// deprecated. The detail after the colon is this port's parser
+	// talking; the sentence in front of it is real's.
+	if strings.Contains(err.Error(), "parsing expression") && strings.Contains(err.Error(), "{{") {
+		return "Task failed: Syntax error in expression. Template delimiters are not supported in expressions: " +
+			innermostDetail(err)
+	}
+	// assert's `that` has no keyword to name: real reports it as a
+	// bare "Error while evaluating conditional".
+	if keyword == "" {
+		return fmt.Sprintf("Task failed: Error while evaluating conditional: %v", innermost(err))
+	}
 	if keyword == "when" {
 		return fmt.Sprintf("Task failed: A 'when' expression failed: Error while evaluating conditional: %v", innermost(err))
 	}
@@ -2785,4 +2809,30 @@ func innermost(err error) error {
 // failed:" wrapping that the msg carries.
 func conditionalResultOf(err error) string {
 	return fmt.Sprintf("Error while evaluating conditional: %v", innermost(err))
+}
+
+// isConditionalArg reports whether a module argument holds a
+// CONDITIONAL rather than a value — assert's `that` is the one this
+// port implements. Real evaluates those with the same rules as
+// `when:`, delimiters included: `that: "{{ x }}"` is the bare-template
+// form, while `that: "{{ n }} == 2"` is a syntax error there because
+// the delimiters sit inside a larger expression.
+func isConditionalArg(module, key string) bool {
+	return modules.NormalizeName(module) == "assert" && key == "that"
+}
+
+// innermostDetail is innermost's message without any "'x' is
+// undefined" special-casing — the parser's own last clause, for an
+// error whose shape this port does not reproduce word for word.
+func innermostDetail(err error) string {
+	// Split on the QUOTE that closes this port's own prefix
+	// (`parsing expression "<src>": `) rather than on the last
+	// ": " — a parser detail like `Expected ":" (Line: 1 Col: 9)`
+	// has colons of its own, and splitting on the last one cut the
+	// message in half.
+	msg := err.Error()
+	if i := strings.LastIndex(msg, `": `); i >= 0 {
+		return msg[i+3:]
+	}
+	return msg
 }

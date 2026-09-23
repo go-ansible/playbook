@@ -1375,3 +1375,66 @@ func TestLoopedArgsFailureSummary(t *testing.T) {
 		t.Errorf("summary = %+v, want failed=1 — not one per printed line", s)
 	}
 }
+
+// TestAssertThatIsAConditional: assert's `that` holds CONDITIONS, not
+// values, and real evaluates them with the same rules as `when:`.
+// This port rendered them as ordinary arguments first, so an
+// undefined name became an args-finalization failure where real
+// reports "Error while evaluating conditional".
+//
+// The delimiter rule comes with it: `that: "{{ x }}"` is the
+// bare-template form, while `that: "{{ n }} == 2"` is a syntax error
+// there because the delimiters sit inside a larger expression.
+func TestAssertThatIsAConditional(t *testing.T) {
+	for _, tc := range []struct{ name, that, want string }{
+		{"undefined name", "nope",
+			"Task failed: Error while evaluating conditional: 'nope' is undefined"},
+		{"undefined in the bare-template form", "{{ nope }}",
+			"Task failed: Error while evaluating conditional: 'nope' is undefined"},
+		{"delimiters inside a larger expression", "{{ n }} == 2",
+			"Task failed: Syntax error in expression. Template delimiters are not supported in expressions: "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  vars: {n: 2}
+  tasks:
+    - {name: t, assert: {that: "` + tc.that + `"}, ignore_errors: true}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cb := &recordingCallback{}
+			e := New(localhostInventory())
+			e.Callbacks = []Callback{cb}
+			if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+				t.Fatal(err)
+			}
+			got := cb.results[0].Msg
+			if !strings.HasPrefix(got, tc.want) {
+				t.Errorf("msg =\n  %s\nwant it to start with\n  %s", got, tc.want)
+			}
+		})
+	}
+	// And a condition that evaluates still works, both ways round.
+	for _, that := range []string{"n == 2", "{{ n == 2 }}"} {
+		pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  vars: {n: 2}
+  tasks:
+    - {name: t, assert: {that: "` + that + `"}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cb := &recordingCallback{}
+		e := New(localhostInventory())
+		e.Callbacks = []Callback{cb}
+		if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+			t.Fatal(err)
+		}
+		if cb.results[0].Failed {
+			t.Errorf("that: %q failed: %s", that, cb.results[0].Msg)
+		}
+	}
+}
