@@ -523,18 +523,40 @@ func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Hos
 	}
 	var order []string
 	for _, h := range hosts {
+		order = append(order, h.Name)
+	}
+	// The inventory-wide magic variables are the same for every host,
+	// so they are built ONCE: groups is every group's membership and
+	// hostvars every host's variables, which is how a playbook
+	// templates one host's config from another's facts.
+	groupsVar := e.groupsVar()
+	hostvarsVar := e.hostvarsVar(groupsVar)
+	playHosts := append([]string{}, order...)
+	// Absolute, as real reports it: a relative playbook path still
+	// yields a full directory.
+	playbookDir := e.BaseDir
+	if abs, err := filepath.Abs(playbookDir); err == nil {
+		playbookDir = abs
+	}
+
+	for _, h := range hosts {
 		vc := vars.New()
 		vc.Set(vars.Inventory, e.Inventory.HostVars(h.Name))
-		// inventory_hostname/playbook_dir are Ansible's "magic
-		// variables" — set after HostVars so a literal host_var of the
-		// same name can't shadow them, matching how hard these are to
-		// override in real Ansible.
-		vc.SetVar(vars.Inventory, "inventory_hostname", h.Name)
-		vc.SetVar(vars.Inventory, "playbook_dir", e.BaseDir)
+		// Ansible's "magic variables" — set after HostVars so a
+		// literal host_var of the same name can't shadow them,
+		// matching how hard these are to override in real Ansible.
+		for k, v := range magicHostVars(e.Inventory, h.Name) {
+			vc.SetVar(vars.Inventory, k, v)
+		}
+		vc.SetVar(vars.Inventory, "groups", groupsVar)
+		vc.SetVar(vars.Inventory, "hostvars", hostvarsVar)
+		vc.SetVar(vars.Inventory, "ansible_play_hosts", playHosts)
+		vc.SetVar(vars.Inventory, "ansible_play_batch", playHosts)
+		vc.SetVar(vars.Inventory, "inventory_dir", e.Inventory.SourceDir)
+		vc.SetVar(vars.Inventory, "playbook_dir", playbookDir)
 		vc.Set(vars.ExtraVars, e.ExtraVars)
 		vc.Set(vars.PlayVars, play.Vars)
 		ec.states[h.Name] = &hostState{name: h.Name, vc: vc, notify: map[int]bool{}}
-		order = append(order, h.Name)
 	}
 	order = orderHosts(order, play.Order)
 
@@ -2888,4 +2910,86 @@ func innermostDetail(err error) string {
 		return msg[i+3:]
 	}
 	return msg
+}
+
+// magicHostVars are the per-host magic variables real sets on every
+// host: its own name, the short form up to the first dot, and the
+// groups it belongs to.
+//
+// group_names EXCLUDES "all" and is sorted — measured: a host in web
+// and prod reports ['prod', 'web'], and a host in no real group
+// reports ['ungrouped'] rather than an empty list.
+func magicHostVars(inv *inventory.Inventory, host string) map[string]any {
+	short := host
+	if i := strings.Index(short, "."); i > 0 {
+		short = short[:i]
+	}
+	var names []string
+	for _, g := range inv.GroupsForHost(host) {
+		if g.Name != "all" {
+			names = append(names, g.Name)
+		}
+	}
+	sort.Strings(names)
+	if names == nil {
+		names = []string{}
+	}
+	return map[string]any{
+		"inventory_hostname":       host,
+		"inventory_hostname_short": short,
+		"group_names":              names,
+	}
+}
+
+// groupsVar is real's `groups`: every group's host list, sorted, with
+// "all" and "ungrouped" among them. It is what a playbook reads to
+// write one host's config from the whole inventory —
+// `{{ groups['web'] }}`.
+func (e *Engine) groupsVar() map[string]any {
+	members := make(map[string][]string, len(e.Inventory.Groups))
+	for name := range e.Inventory.Groups {
+		members[name] = nil
+	}
+	// Membership is TRANSITIVE: GroupsForHost walks the ancestry, so a
+	// host in web lands in "all" too — which is what makes
+	// groups['all'] the whole inventory while "all" itself lists no
+	// host directly.
+	for host := range e.Inventory.Hosts {
+		for _, g := range e.Inventory.GroupsForHost(host) {
+			members[g.Name] = append(members[g.Name], host)
+		}
+	}
+	out := make(map[string]any, len(members))
+	for name, hosts := range members {
+		sort.Strings(hosts)
+		if hosts == nil {
+			hosts = []string{}
+		}
+		out[name] = hosts
+	}
+	return out
+}
+
+// hostvarsVar is real's `hostvars`: every host's variables, keyed by
+// host name, each including that host's own magic variables — so
+// `hostvars['web1']['inventory_hostname']` resolves, as it does there.
+//
+// The inventory-wide entries are shared rather than rebuilt per host:
+// a hostvars entry that carried its own copy of hostvars would
+// recurse.
+func (e *Engine) hostvarsVar(groups map[string]any) map[string]any {
+	out := make(map[string]any, len(e.Inventory.Hosts))
+	for name := range e.Inventory.Hosts {
+		vars := e.Inventory.HostVars(name)
+		merged := make(map[string]any, len(vars)+4)
+		for k, v := range vars {
+			merged[k] = v
+		}
+		for k, v := range magicHostVars(e.Inventory, name) {
+			merged[k] = v
+		}
+		merged["groups"] = groups
+		out[name] = merged
+	}
+	return out
 }
