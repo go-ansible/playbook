@@ -776,6 +776,31 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 		}
 	}
 
+	// A dynamic include announces itself, once per host, before its
+	// tasks run: a TASK banner and an "included: <path> for <host>"
+	// line that counts toward ok in the recap. A static import
+	// announces nothing, which is why this keys on IncludedFile rather
+	// than on being a block.
+	if task.IncludedFile != "" {
+		for _, h := range active {
+			ec.report(pr, Result{
+				Host: h, Task: task.Name,
+				Included: task.IncludedFile,
+			})
+		}
+	}
+
+	// A block's own vars: reach every task inside it and go out of
+	// scope with it. The BlockVars layer existed, named and ordered
+	// between the play's and the task's, and NOTHING ever wrote to it —
+	// so `block: {vars: {v: x}}` was accepted and dropped, and so was
+	// the vars: on an include_tasks/import_tasks, which parse into a
+	// synthetic block. A playbook parameterising an included file got
+	// the variable undefined.
+	if len(task.Vars) > 0 {
+		defer ec.pushBlockVars(active, task.Vars)()
+	}
+
 	originalActive := append([]string{}, active...)
 
 	afterBlock := ec.runTaskList(ctx, task.Block, active, pr)
@@ -844,6 +869,26 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 // on top of the enclosing role's, so a variable the inner role does not
 // define still resolves to the outer role's value, and unwinding returns
 // to exactly what the enclosing role had.
+// pushBlockVars layers vals over whatever block vars are already in
+// scope for each host and returns the undo. Merging rather than
+// replacing is what makes a block nested inside another see both sets,
+// and restoring the PRIOR map (not deleting the layer) is what lets
+// that nesting unwind to any depth.
+func (ec *execCtx) pushBlockVars(active []string, vals map[string]any) func() {
+	prior := make(map[string]map[string]any, len(active))
+	for _, h := range active {
+		st := ec.states[h]
+		priorVars := st.vc.Layer(vars.BlockVars)
+		prior[h] = priorVars
+		st.vc.Set(vars.BlockVars, mergeOnto(priorVars, vals))
+	}
+	return func() {
+		for _, h := range active {
+			ec.states[h].vc.Set(vars.BlockVars, prior[h])
+		}
+	}
+}
+
 func (ec *execCtx) pushRoleVars(active []string, defaults, roleVars map[string]any) func() {
 	type saved struct{ defaults, vars map[string]any }
 	prior := make(map[string]saved, len(active))

@@ -234,6 +234,14 @@ type Task struct {
 	// still resolve.
 	RoleVarsScoped bool
 
+	// IncludedFile is set on the synthetic block an include_tasks
+	// parses into, and holds the resolved path of the file it pulled
+	// in. Real Ansible announces a dynamic include — a banner plus
+	// "included: <path> for <host>", counted as ok in the recap — and
+	// announces nothing for a static import; this carries what that
+	// line needs.
+	IncludedFile string
+
 	// RoleDir is the directory of the role this task came from, empty
 	// for a task written directly in a playbook. A relative src: on a
 	// file-carrying module resolves against it — real Ansible looks in
@@ -883,10 +891,49 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 // includeTasksTask resolves an include_tasks/import_tasks directive
 // into a synthetic block task whose body is the referenced file's task
 // list, parsed relative to ctx.baseDir.
+// includeFilePath accepts both shapes real Ansible takes for an
+// include's target: the bare string (include_tasks: more.yml) and the
+// mapping form (include_tasks: {file: more.yml}), which also carries
+// apply:/rescue-style options this port does not support. Only the
+// bare string was accepted here, so the documented mapping form was a
+// parse error.
+func includeFilePath(v any) (string, error) {
+	switch val := v.(type) {
+	case string:
+		return val, nil
+	case map[string]any:
+		file, ok := val["file"].(string)
+		if !ok {
+			return "", fmt.Errorf("expected a file: key naming the path, got %v", val)
+		}
+		for k := range val {
+			if k != "file" {
+				return "", fmt.Errorf("%q is not supported alongside file:", k)
+			}
+		}
+		return file, nil
+	default:
+		return "", fmt.Errorf("expected a file path string or a mapping with file:, got %T", v)
+	}
+}
+
 func includeTasksTask(ctx parseCtx, t Task, key string, v any) (Task, error) {
-	path, ok := v.(string)
-	if !ok {
-		return t, fmt.Errorf("task %q: %s: expected a file path string, got %T", t.Name, key, v)
+	path, err := includeFilePath(v)
+	if err != nil {
+		return t, fmt.Errorf("task %q: %s: %w", t.Name, key, err)
+	}
+	// Real Ansible announces a DYNAMIC include with a banner and an
+	// "included: <path> for <host>" line, which counts toward ok in the
+	// recap; a static import announces nothing. This port is static for
+	// both (see below), so the announcement is carried on the synthetic
+	// block rather than produced by a run-time resolution step.
+	if key == "include_tasks" {
+		// Real prints the ABSOLUTE resolved path, whatever the
+		// playbook was invoked as.
+		t.IncludedFile = filepath.Join(ctx.baseDir, path)
+		if abs, err := filepath.Abs(t.IncludedFile); err == nil {
+			t.IncludedFile = abs
+		}
 	}
 	tasks, err := loadYAMLTaskFile(ctx, filepath.Join(ctx.baseDir, path), false)
 	if err != nil {
