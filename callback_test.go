@@ -966,3 +966,82 @@ func TestBecomeUserIsTemplated(t *testing.T) {
 		t.Errorf("msg = %q, want it to name the RENDERED user", msg)
 	}
 }
+
+// TestRescueVariables pins ansible_failed_task/ansible_failed_result,
+// the documented way a rescue: says WHY it is rescuing. Neither
+// existed, so `{{ ansible_failed_result.msg }}` — the idiom the
+// Ansible docs give for a rescue block — failed on an undefined
+// variable.
+//
+// Shapes measured against real ansible-core 2.21.4: both are set the
+// moment a block starts rescuing and are still readable in always:
+// and AFTER the block, because real sets them as nonpersistent facts
+// rather than scoping them to the rescue.
+func TestRescueVariables(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - block:
+        - {name: the failing one, command: "false"}
+      rescue:
+        - {name: why, debug: {msg: "{{ ansible_failed_task.name }}/{{ ansible_failed_task.action }}/{{ ansible_failed_result.rc }}"}}
+      always:
+        - {name: in always, debug: {msg: "{{ ansible_failed_task.name }}"}}
+    - {name: after the block, debug: {msg: "failed={{ ansible_failed_result.failed }}"}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := &recordingCallback{}
+	e := New(localhostInventory())
+	e.Callbacks = []Callback{cb}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, r := range cb.results {
+		got[r.Task] = r.Msg
+	}
+	for _, tc := range []struct{ task, want string }{
+		{"why", "the failing one/command/1"},
+		{"in always", "the failing one"},
+		// Surrounding text on purpose: a msg that is EXACTLY one
+		// expression keeps the value's type (real emits a JSON
+		// boolean there, and so does this port), which would be
+		// asking a different question than this test's.
+		{"after the block", "failed=True"},
+	} {
+		if got[tc.task] != tc.want {
+			t.Errorf("%s: msg = %q, want %q", tc.task, got[tc.task], tc.want)
+		}
+	}
+}
+
+// TestRescueVariablesNotSetByAnIgnoredFailure: real only sets these
+// when a block is actually RESCUING. A failure the task's own
+// ignore_errors swallowed is not one, and neither is a task that
+// failed with no rescue to catch it.
+func TestRescueVariablesNotSetByAnIgnoredFailure(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - {name: swallowed, command: "false", ignore_errors: true}
+    - {name: after, debug: {msg: "defined={{ ansible_failed_task is defined }}"}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := &recordingCallback{}
+	e := New(localhostInventory())
+	e.Callbacks = []Callback{cb}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range cb.results {
+		if r.Task == "after" && r.Msg != "defined=False" {
+			t.Errorf("ansible_failed_task = %q after an IGNORED failure, want it unset", r.Msg)
+		}
+	}
+}
