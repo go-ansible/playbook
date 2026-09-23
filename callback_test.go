@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/go-ansible/inventory"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1485,5 +1486,68 @@ func TestOutputOrderIsDeterministic(t *testing.T) {
 	// And the order is the play's host order, not an arbitrary one.
 	if !strings.HasPrefix(want, "a:") {
 		t.Errorf("order = %s", want)
+	}
+}
+
+// TestMagicVariables pins Ansible's inventory magic variables against
+// shapes MEASURED from real ansible-core 2.21.4. Seven were missing
+// outright and one was wrong; `groups` and `hostvars` are the two a
+// real playbook leans on, to template one host's config from the
+// whole inventory.
+func TestMagicVariables(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "inv.ini"), []byte(
+		"lonely\nweb1.example.com\n\n[web]\nweb1.example.com\n\n[prod]\nweb1.example.com\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inv, err := inventory.Load(filepath.Join(dir, "inv.ini"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: t
+      debug:
+        msg: >-
+          short={{ inventory_hostname_short }}
+          gn={{ group_names | join(',') }}
+          play={{ ansible_play_hosts | join(',') }}
+          batch={{ ansible_play_batch | join(',') }}
+          all={{ groups['all'] | join(',') }}
+          web={{ groups['web'] | join(',') }}
+          ungrouped={{ groups['ungrouped'] | join(',') }}
+          hv={{ hostvars['lonely']['inventory_hostname'] }}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := &recordingCallback{}
+	e := New(inv)
+	e.Callbacks = []Callback{cb}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, r := range cb.results {
+		got[r.Host] = r.Msg
+	}
+	// Inventory order, not alphabetical — lonely was written first.
+	want := map[string]string{
+		"lonely": "short=lonely gn=ungrouped play=lonely,web1.example.com " +
+			"batch=lonely,web1.example.com all=lonely,web1.example.com " +
+			"web=web1.example.com ungrouped=lonely hv=lonely",
+		// The short form stops at the first dot, and a host in two
+		// groups reports both — and NOT "ungrouped", which it left
+		// the moment a group claimed it.
+		"web1.example.com": "short=web1 gn=prod,web play=lonely,web1.example.com " +
+			"batch=lonely,web1.example.com all=lonely,web1.example.com " +
+			"web=web1.example.com ungrouped=lonely hv=lonely",
+	}
+	for host, w := range want {
+		if got[host] != w {
+			t.Errorf("%s:\n  got  %s\n  want %s", host, got[host], w)
+		}
 	}
 }
