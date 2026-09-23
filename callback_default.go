@@ -137,6 +137,10 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 	}
 
 	switch {
+	case r.Included != "":
+		// Real Ansible's own announcement for a dynamic include, in
+		// the default (uncoloured) colour — measured, not assumed.
+		fmt.Fprintf(c.w, "included: %s for %s\n", r.Included, r.Host)
 	case r.Failed:
 		// Real Ansible writes "fatal: [h]: FAILED! => {json}" with the
 		// whole result inline, which is how a reader sees WHY a command

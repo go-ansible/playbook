@@ -828,3 +828,100 @@ func TestMetaBannersWithoutAResult(t *testing.T) {
 		t.Errorf("summary = %+v, want ok=1 — meta counts toward nothing", s)
 	}
 }
+
+// TestBlockAndIncludeVars pins vars: on a block and on an include,
+// MEASURED against real ansible-core 2.21.4. The BlockVars layer had
+// existed — named, ordered between the play's and the task's — with
+// nothing ever writing to it, so `block: {vars: ...}` was accepted and
+// dropped, and so was the vars: on an include_tasks/import_tasks,
+// which parse into a synthetic block here. A playbook parameterising
+// an included file got the variable undefined.
+func TestBlockAndIncludeVars(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "inc.yml"), []byte(
+		"- {name: included, debug: {msg: \"got {{ passed | default('nothing') }}\"}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "play.yml"), []byte(`
+- hosts: all
+  gather_facts: false
+  vars: {v: play}
+  tasks:
+    - name: the block
+      vars: {v: block, only_here: 1}
+      block:
+        - {name: inside, debug: {msg: "{{ v }}/{{ only_here }}"}}
+        - {name: task wins, vars: {v: task}, debug: {msg: "{{ v }}"}}
+    - {name: after, debug: {msg: "{{ v }}/{{ only_here | default('gone') }}"}}
+    - {name: imported, import_tasks: inc.yml, vars: {passed: from-import}}
+    - {name: included, include_tasks: inc.yml, vars: {passed: from-include}}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pb, err := ParseFile(filepath.Join(dir, "play.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := &recordingCallback{}
+	e := New(localhostInventory())
+	e.Callbacks = []Callback{cb}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs := map[string][]string{}
+	var includedLine string
+	for _, r := range cb.results {
+		if r.Included != "" {
+			includedLine = r.Included
+			continue
+		}
+		msgs[r.Task] = append(msgs[r.Task], r.Msg)
+	}
+	for _, tc := range []struct{ task, want string }{
+		{"inside", "block/1"},
+		{"task wins", "task"},
+		// Block vars go out of scope with the block, as they do there.
+		{"after", "play/gone"},
+	} {
+		if got := msgs[tc.task]; len(got) != 1 || got[0] != tc.want {
+			t.Errorf("%s: msg = %v, want [%q]", tc.task, got, tc.want)
+		}
+	}
+	// Both include forms carry their vars in — import was dropping them too.
+	want := []string{"got from-import", "got from-include"}
+	if got := msgs["included"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("included msgs = %v, want %v", got, want)
+	}
+	// And only the DYNAMIC one announces itself, with an absolute path.
+	if !filepath.IsAbs(includedLine) || filepath.Base(includedLine) != "inc.yml" {
+		t.Errorf("included line = %q, want the absolute path of inc.yml", includedLine)
+	}
+}
+
+// TestIncludeTasksFileForm: real accepts include_tasks: {file: path}
+// as well as the bare string. Only the string parsed here, so the
+// documented mapping form was a parse error.
+func TestIncludeTasksFileForm(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "inc.yml"), []byte(
+		"- {name: included, debug: {msg: hi}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "play.yml"), []byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: mapping form
+      include_tasks: {file: inc.yml}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pb, err := ParseFile(filepath.Join(dir, "play.yml"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if n := len(pb[0].Tasks[0].Block); n != 1 {
+		t.Fatalf("block has %d tasks, want the one from the included file", n)
+	}
+}

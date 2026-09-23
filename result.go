@@ -16,6 +16,11 @@ type Result struct {
 	Failed  bool
 	Skipped bool
 
+	// Included is the file a dynamic include_tasks pulled in, and is
+	// set only on the announcement result real Ansible prints for one:
+	// "included: <path> for <host>".
+	Included string
+
 	// BannerOnly marks a result that exists only to banner its task:
 	// real Ansible's meta: fires the task-start callback and no runner
 	// callback at all, so it prints a TASK header with no line under
