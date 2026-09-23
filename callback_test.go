@@ -925,3 +925,44 @@ func TestIncludeTasksFileForm(t *testing.T) {
 		t.Fatalf("block has %d tasks, want the one from the included file", n)
 	}
 }
+
+// TestBecomeUserIsTemplated: `become_user: "{{ deploy_user }}"` reached
+// sudo as the literal braces, so the escalation failed with
+// "unknown user {{ deploy_user }}". Real templates it — measured, by
+// reading back which user sudo was actually handed.
+//
+// The witness is the failure message, because escalating for real
+// needs a privilege this test cannot assume: an unknown user name is
+// refused by name, and that name is what is being checked.
+func TestBecomeUserIsTemplated(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  vars: {deploy_user: measured_name}
+  tasks:
+    - name: escalate
+      command: "true"
+      become: true
+      become_user: "{{ deploy_user }}"
+      ignore_errors: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := &recordingCallback{}
+	e := New(localhostInventory())
+	e.Callbacks = []Callback{cb}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	if len(cb.results) != 1 {
+		t.Fatalf("results = %#v, want one", cb.results)
+	}
+	msg := cb.results[0].Msg
+	if strings.Contains(msg, "{{") {
+		t.Errorf("become_user reached the transport untemplated: %q", msg)
+	}
+	if !strings.Contains(msg, "measured_name") {
+		t.Errorf("msg = %q, want it to name the RENDERED user", msg)
+	}
+}

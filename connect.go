@@ -209,10 +209,19 @@ func boolVar(vars map[string]any, key string, def bool) bool {
 // (task-level overrides play-level) into a remoteexec.BecomeConfig, or
 // reports enabled=false if no escalation applies.
 func becomeConfigFor(play Play, task Task, hostVars map[string]any) (cfg remoteexec.BecomeConfig, enabled bool) {
+	// Precedence, measured against real ansible-core 2.21.4 and the
+	// same as connection's: HOST VAR > task keyword > play keyword.
+	//
+	// The host var winning is the counter-intuitive half, and both
+	// directions were wrong here. `ansible_become=false` on a host was
+	// ignored, so a task written `become: true` escalated on a host
+	// that said not to; and `ansible_become=true` was ignored too, so a
+	// task meant to escalate ran unprivileged.
 	enabled = play.Become
 	if task.Become != nil {
 		enabled = *task.Become
 	}
+	enabled = boolVar(hostVars, "ansible_become", enabled)
 	if !enabled {
 		return remoteexec.BecomeConfig{}, false
 	}
@@ -220,6 +229,7 @@ func becomeConfigFor(play Play, task Task, hostVars map[string]any) (cfg remotee
 	if task.BecomeUser != "" {
 		user = task.BecomeUser
 	}
+	user = strVar(hostVars, "ansible_become_user", user)
 	method := remoteexec.BecomeSudo
 	switch strVar(hostVars, "ansible_become_method", play.BecomeMethod) {
 	case "su":
