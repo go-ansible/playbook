@@ -218,6 +218,15 @@ type hostState struct {
 	// followed by another that tries again.
 	connErr error
 
+	// currentTask is what this host is running right now, and
+	// lastFailedTask/lastFailedResult are the most recent failure —
+	// what a rescue: block reads back as ansible_failed_task and
+	// ansible_failed_result. Recorded per host, and only ever touched
+	// by that host's own goroutine.
+	currentTask      Task
+	lastFailedTask   Task
+	lastFailedResult map[string]any
+
 	failed bool
 	notify map[string]bool
 }
@@ -809,7 +818,15 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 	stillFailed := newlyFailed
 	if len(task.Rescue) > 0 && len(newlyFailed) > 0 {
 		for _, h := range newlyFailed {
-			ec.states[h].failed = false
+			st := ec.states[h]
+			st.failed = false
+			// Real sets these as nonpersistent FACTS the moment a
+			// block starts rescuing, which is why they are still
+			// readable in always: and after the block — measured, not
+			// assumed.
+			st.vc.SetVar(vars.Facts, "ansible_failed_task",
+				failedTaskDict(st.lastFailedTask, ec.play, resolvedConnection(ec.play, st.vc.Merged())))
+			st.vc.SetVar(vars.Facts, "ansible_failed_result", st.lastFailedResult)
 		}
 		afterRescue := ec.runTaskList(ctx, task.Rescue, newlyFailed, pr)
 		rescueFailed := diff(newlyFailed, afterRescue)
@@ -1231,6 +1248,10 @@ func (ec *execCtx) runAsyncTask(ctx context.Context, task Task, conn remoteexec.
 // and reports whether the host should be excluded from the rest of the
 // play (a failure not covered by ignore_errors).
 func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, pr *PlayResult, isHandler bool) bool {
+	// Noted here rather than at each of the six places a task can
+	// fail, so ec.report can attribute ANY failure to the task that
+	// caused it — a when: that would not evaluate included.
+	st.currentTask = task
 	scope := st.vc.Child()
 	scope.Set(vars.TaskVars, task.Vars)
 
@@ -1939,7 +1960,196 @@ func splitCommaList(s string) []string {
 // records the result on the play and raises it to the caller's own
 // reporting hooks. Nothing should call pr.record directly — a result
 // that skips this is a result no callback ever sees.
+
+// resolvedConnection is the connection name real reports in
+// ansible_failed_task, fully qualified as it is there
+// ("ansible.builtin.local").
+func resolvedConnection(play Play, hostVars map[string]any) string {
+	name := strVar(hostVars, "ansible_connection", play.Connection)
+	if name == "" {
+		name = "ssh"
+	}
+	return "ansible.builtin." + modules.NormalizeName(name)
+}
+
+func becomeOf(t Task, play Play) bool {
+	if t.Become != nil {
+		return *t.Become
+	}
+	return play.Become
+}
+
+func boolPtrOr(task, play *bool, def bool) bool {
+	if task != nil {
+		return *task
+	}
+	if play != nil {
+		return *play
+	}
+	return def
+}
+
+func intPtrOr(p *int, def int) int {
+	if p != nil {
+		return *p
+	}
+	return def
+}
+
+func intPtrOrNil(p *int) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+// mergedTaskEnvironment is the play's environment with the task's over
+// it, the same merge taskEnvironment does at run time but without a
+// host's variables to render against — this is a report of what the
+// task DECLARED, which is what real's attribute dump carries too.
+func mergedTaskEnvironment(t Task, play Play) map[string]any {
+	out := map[string]any{}
+	for k, v := range play.Environment {
+		out[k] = v
+	}
+	for k, v := range t.Environment {
+		out[k] = v
+	}
+	return out
+}
+
+// moduleDefaultsList reports module_defaults the way real does: a LIST
+// of per-module maps, empty when there are none.
+func moduleDefaultsList(t Task) []any {
+	if len(t.ModuleDefaults) == 0 {
+		return []any{}
+	}
+	out := map[string]any{}
+	for name, args := range t.ModuleDefaults {
+		out[name] = args
+	}
+	return []any{out}
+}
+
+// failedResultDict is what a rescue: reads back as
+// ansible_failed_result: the failing task's whole result, the shape
+// the callback would have dumped.
+//
+// "exception" is real's, wording included. It looks like a Python
+// detail but is not one: real fills this slot on EVERY failed module
+// result, and for a plain non-zero exit — no exception raised at all —
+// it writes exactly "(traceback unavailable)". Which is also true
+// here, for a different reason.
+func failedResultDict(r Result) map[string]any {
+	out := map[string]any{
+		"changed":   r.Changed,
+		"exception": "(traceback unavailable)",
+		"failed":    true,
+		"msg":       r.Msg,
+	}
+	for k, v := range r.Extra {
+		if strings.HasPrefix(k, "_ansible_") {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// failedTaskDict is what a rescue: reads back as ansible_failed_task.
+//
+// Real dumps every one of a task's 43 field attributes
+// (Task.dump_attrs), including keywords this port refuses and a couple
+// of values that are pure ansible-core internals — `register` comes
+// out as {"r": "_task.polymorphic_result"} there. This dict carries
+// the attributes this port actually models, under real's own names and
+// shapes, which covers what a rescue is written to read:
+// .name, .action and .args. It is NARROWER than real's, named here
+// rather than left to be discovered.
+func failedTaskDict(t Task, play Play, connection string) map[string]any {
+	// changed_when/failed_when/until are LISTS there, empty when
+	// unset — not the bare strings this port keeps them as.
+	asList := func(s string) []any {
+		if s == "" {
+			return []any{}
+		}
+		return []any{s}
+	}
+	args := map[string]any{}
+	for k, v := range t.Args {
+		args[k] = v
+	}
+	return map[string]any{
+		"name":             t.Name,
+		"action":           t.Module,
+		"_resolved_action": "ansible.builtin." + t.Module,
+		"args":             args,
+		"any_errors_fatal": t.AnyErrorsFatal,
+		"async":            t.Async,
+		"become_user":      t.BecomeUser,
+		"changed_when":     asList(t.ChangedWhen),
+		"delay":            t.Delay,
+		"delegate_to":      t.DelegateTo,
+		"failed_when":      asList(t.FailedWhen),
+		"ignore_errors":    t.IgnoreErrors,
+		"loop":             t.Loop,
+		"loop_control": map[string]any{
+			"loop_var":  t.LoopVar,
+			"index_var": t.IndexVar,
+		},
+		"no_log":   t.NoLog,
+		"notify":   t.Notify,
+		"register": t.Register,
+		"run_once": t.RunOnce,
+		"tags":     t.Tags,
+		"until":    asList(t.Until),
+		"vars":     t.Vars,
+		"when":     asList(t.When),
+
+		// The rest of real's attribute set. Those this port MODELS
+		// carry its own value; those it refuses can only ever be at
+		// real's default, so reporting that default is accurate
+		// rather than invented. Emitting them is what makes
+		// ansible_failed_task.keys() match real's.
+		"become":             becomeOf(t, play),
+		"become_method":      play.BecomeMethod,
+		"check_mode":         boolPtrOr(t.CheckMode, play.CheckMode, false),
+		"connection":         connection,
+		"diff":               false,
+		"environment":        []any{mergedTaskEnvironment(t, play)},
+		"ignore_unreachable": boolPtrOr(t.IgnoreUnreachable, nil, play.IgnoreUnreachable),
+		"module_defaults":    moduleDefaultsList(t),
+		"poll":               intPtrOr(t.Poll, 15),
+		"retries":            intPtrOrNil(t.Retries),
+
+		// Keywords this port refuses by name (unhonouredTaskKeys):
+		// never anything but real's default.
+		"async_val":      t.Async,
+		"become_exe":     nil,
+		"become_flags":   nil,
+		"collections":    []any{},
+		"debugger":       nil,
+		"delegate_facts": nil,
+		"loop_with":      nil,
+		"port":           nil,
+		"remote_user":    nil,
+		"throttle":       0,
+		"timeout":        0,
+	}
+}
+
 func (ec *execCtx) report(pr *PlayResult, r Result) {
+	// A failure a rescue: could catch is remembered on its host, for
+	// ansible_failed_task/ansible_failed_result. An IGNORED failure is
+	// not one — real only sets these when a block is actually
+	// rescuing — and neither is an unreachable host, which no rescue
+	// gets to run for.
+	if r.Failed && !r.Ignored && !r.Unreachable {
+		if st := ec.states[r.Host]; st != nil {
+			st.lastFailedTask = st.currentTask
+			st.lastFailedResult = failedResultDict(r)
+		}
+	}
 	pr.record(r)
 	if ec.engine.OnResult != nil {
 		ec.engine.OnResult(r)
