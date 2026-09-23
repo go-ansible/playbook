@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	github.com/go-ansible/facts v0.1.0
-	github.com/go-ansible/inventory v0.8.0
+	github.com/go-ansible/inventory v0.9.0
 	github.com/go-ansible/modules v0.51.0
 	github.com/go-ansible/template v0.25.0
 	github.com/go-ansible/vars v0.1.2
