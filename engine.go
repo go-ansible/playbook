@@ -1343,9 +1343,21 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 
 	for index, item := range items {
 		iter := scope
+		// What this iteration prints in its "(item=...)": the item
+		// itself, unless loop_control.label named something else.
+		// Declared out here because every report site in the
+		// iteration uses it, not just the ones inside the loop setup.
+		label := item
 		if looping {
 			iter = scope.Child()
 			iter.SetVar(vars.TaskVars, task.LoopVar, item)
+			if task.LoopLabel != "" {
+				// Rendered with the item already in scope, so
+				// `label: "{{ item.name }}"` resolves per iteration.
+				if rendered, lerr := ec.engine.Template.Render(task.LoopLabel, iter.Merged()); lerr == nil {
+					label = rendered
+				}
+			}
 			if task.IndexVar != "" {
 				// loop_control.index_var, 0-based as in real Ansible.
 				iter.SetVar(vars.TaskVars, task.IndexVar, index)
@@ -1356,7 +1368,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			if task.When != "" {
 				ok, werr := ec.evalWhen(task.When, iter.Merged())
 				if werr != nil {
-					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: "when: " + werr.Error(), Item: item, Looped: true})
+					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Msg: "when: " + werr.Error(), Item: item, ItemLabel: label, Looped: true})
 					anyFailed = true
 					if !task.IgnoreErrors {
 						break
@@ -1364,7 +1376,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 					continue
 				}
 				if !ok {
-					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Skipped: true, Item: item, Looped: true})
+					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Skipped: true, Item: item, ItemLabel: label, Looped: true})
 					continue
 				}
 			}
@@ -1597,8 +1609,8 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			Handler:  isHandler,
 			Role:     roleName(task),
 			NoLog:    task.NoLog,
-			Item:     item,
-			Looped:   looping,
+			Item:     item, ItemLabel: label,
+			Looped: looping,
 		})
 
 		// set_fact's/include_vars' variables are accessible by their

@@ -16,6 +16,13 @@ type Result struct {
 	Failed  bool
 	Skipped bool
 
+	// ItemLabel is what a looping task prints in its `(item=...)`:
+	// loop_control.label when the task set one, and the item itself
+	// otherwise. Kept apart from Item because Item is what register:
+	// and the result dict carry, and a label only changes the
+	// PRINTING.
+	ItemLabel any
+
 	// Included is the file a dynamic include_tasks pulled in, and is
 	// set only on the announcement result real Ansible prints for one:
 	// "included: <path> for <host>".

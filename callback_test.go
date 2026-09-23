@@ -1177,3 +1177,47 @@ func TestLoopAndWithAreExclusive(t *testing.T) {
 		t.Errorf("err = %v, want one naming the conflict", err)
 	}
 }
+
+// TestLoopControlLabel: loop_control.label replaces what a looping
+// task prints in its `(item=...)` — the point being a loop over big
+// dicts that stays readable. It was parsed and dropped, so the label
+// never appeared.
+//
+// The label is a TEMPLATE rendered per iteration, with the item
+// already in scope.
+func TestLoopControlLabel(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: labelled
+      debug: {msg: "{{ item.name }}"}
+      loop:
+        - {name: alice, secret: s1}
+        - {name: bob, secret: s2}
+      loop_control:
+        label: "user {{ item.name }}"
+    - name: unlabelled
+      debug: {msg: "{{ item }}"}
+      loop: [x]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	e := New(localhostInventory())
+	e.Callbacks = []Callback{NewDefaultCallback(&buf, false)}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"(item=user alice)", "(item=user bob)", "(item=x)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	// The label REPLACES the item; the secret must not be printed.
+	if strings.Contains(out, "s1") {
+		t.Errorf("the labelled iteration leaked the item it was labelling:\n%s", out)
+	}
+}

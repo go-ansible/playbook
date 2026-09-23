@@ -376,7 +376,11 @@ func itemLabel(r Result) string {
 	// Python's str(), not Go's %v: real labels a dict item
 	// {'k': 'v'} where %v gave map[k:v], and a nil None where %v gave
 	// <nil>. Every loop over anything but a scalar diverged.
-	return " => (item=" + template.PythonStr(r.Item) + ")"
+	shown := r.Item
+	if r.ItemLabel != nil {
+		shown = r.ItemLabel
+	}
+	return " => (item=" + template.PythonStr(shown) + ")"
 }
 
 // skippedItemLabel is itemLabel plus the TRAILING SPACE real Ansible
