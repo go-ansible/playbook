@@ -112,9 +112,10 @@ func (c *DefaultCallback) OnPlayStart(play Play, hosts []string) {
 
 	// Real Ansible says so rather than printing nothing, so a mistyped
 	// host pattern is distinguishable from a play that genuinely had
-	// no work. (Real also emits a "[WARNING]: Could not match supplied
-	// host pattern" line on STDERR; this callback holds only the one
-	// output stream, so that line is a remaining gap.)
+	// no work. Real ALSO emits a "[WARNING]: Could not match supplied
+	// host pattern" line for it, but on stderr rather than here — the
+	// Engine's Warner writes that one, because it is a warning about
+	// the run's inputs rather than a report of its progress.
 	if len(hosts) == 0 {
 		fmt.Fprintln(c.w, "skipping: no hosts matched")
 	}
