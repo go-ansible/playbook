@@ -67,6 +67,17 @@ type Engine struct {
 	// concurrency contract every hook is held to.
 	Callbacks []Callback
 
+	// Warn reports a non-fatal diagnostic about the run's inputs — a
+	// host pattern that matched nothing, for one. New installs a Warner
+	// writing real Ansible's "[WARNING]: " lines to stderr; a caller
+	// that already has one (go-ansible/cli builds the Warner it uses for
+	// its own inventory warnings) should assign THAT one here, so the
+	// whole process shares a single deduplication set the way real's one
+	// Display singleton does.
+	//
+	// A nil Warn is silent, not a panic.
+	Warn Warner
+
 	// Forks caps how many hosts run concurrently at once — connecting/
 	// gathering facts, and each task/handler fan-out (runSingleTask,
 	// runFree) all respect it — matching real Ansible's own forks
@@ -188,6 +199,7 @@ func New(inv *inventory.Inventory) *Engine {
 		BaseDir:   ".",
 		Forks:     envInt("ANSIBLE_FORKS", 5), // real Ansible's own default (DEFAULT_FORKS)
 		Prompt:    defaultPrompt,
+		Warn:      defaultWarner(),
 		// Real Ansible reads the same variable, and defaults to off.
 		AllowBrokenConditionals: envBool("ANSIBLE_ALLOW_BROKEN_CONDITIONALS", false),
 	}
@@ -396,9 +408,17 @@ func (e *Engine) applyVarsPrompt(play *Play) error {
 func (e *Engine) runPlay(ctx context.Context, play Play) (*PlayResult, error) {
 	pr := newPlayResult(play.Name)
 
-	hosts, err := e.Inventory.Match(play.Hosts)
+	hosts, unmatched, err := e.Inventory.MatchReport(play.Hosts)
 	if err != nil {
 		return pr, fmt.Errorf("play %q: %w", play.Name, err)
+	}
+	// A pattern term that matched nothing is worth saying out loud:
+	// without it, a play whose hosts: is a typo is indistinguishable
+	// from one that deliberately selects nothing, and both just print
+	// "skipping: no hosts matched". Real says so once per term, on
+	// stderr, which is why this does not go through the callback.
+	for _, term := range unmatched {
+		e.warn("Could not match supplied host pattern, ignoring: " + term)
 	}
 	if hosts, err = e.applyLimit(hosts); err != nil {
 		return pr, fmt.Errorf("play %q: %w", play.Name, err)
@@ -2529,9 +2549,17 @@ func (e *Engine) applyLimit(hosts []*inventory.Host) ([]*inventory.Host, error) 
 	if e.Limit == "" {
 		return hosts, nil
 	}
-	allowed, err := e.Inventory.Match(e.Limit)
+	allowed, unmatched, err := e.Inventory.MatchReport(e.Limit)
 	if err != nil {
 		return nil, fmt.Errorf("--limit %q: %w", e.Limit, err)
+	}
+	// A --limit term that matched nothing warns exactly as a play's
+	// own pattern does — real emits the same sentence for both, from
+	// the same place. This runs once per play while real evaluates the
+	// subset once, which the Warner's deduplication makes invisible:
+	// the line is written the first time and suppressed after.
+	for _, term := range unmatched {
+		e.warn("Could not match supplied host pattern, ignoring: " + term)
 	}
 	keep := make(map[string]bool, len(allowed))
 	for _, h := range allowed {
