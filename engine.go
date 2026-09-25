@@ -269,8 +269,17 @@ type execCtx struct {
 
 	// sem caps concurrent per-host work at Engine.Forks — nil (Forks <=
 	// 0) means unlimited, matching every fan-out point's own prior
-	// behavior before Forks existed.
-	sem chan struct{}
+	// behavior before Forks existed. It is FIFO: see forkLimiter for
+	// why that is a requirement rather than a nicety.
+	sem *forkLimiter
+
+	// free records that this play uses strategy: free, where each host
+	// advances through the task list in its own goroutine. It matters
+	// to the fork limit: under free, runSingleTask is called
+	// CONCURRENTLY with one host each, so a fast path that skips the
+	// limiter lets every host run flat out no matter what --forks
+	// says.
+	free bool
 
 	// playAborted records that any_errors_fatal or max_fail_percentage
 	// tripped. It stops the whole PLAY, not just this batch: a rolling
@@ -281,13 +290,7 @@ type execCtx struct {
 // acquire blocks until a fork slot is free (a no-op when ec.sem is nil,
 // i.e. Forks <= 0) and returns the matching release func — always
 // call it, typically via defer, even when acquire itself is a no-op.
-func (ec *execCtx) acquire() func() {
-	if ec.sem == nil {
-		return func() {}
-	}
-	ec.sem <- struct{}{}
-	return func() { <-ec.sem }
-}
+func (ec *execCtx) acquire() func() { return ec.sem.acquire() }
 
 // delegateConn returns the connection to use for a delegate_to target,
 // opening and caching one on first use. A delegate target that is also
@@ -539,7 +542,7 @@ func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Hos
 		delegateConns: map[string]remoteexec.Connection{},
 	}
 	if e.Forks > 0 {
-		ec.sem = make(chan struct{}, e.Forks)
+		ec.sem = newForkLimiter(e.Forks)
 	}
 	var order []string
 	for _, h := range hosts {
@@ -591,7 +594,21 @@ func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Hos
 	}()
 
 	active := activeHosts(ec.states, order)
-	if play.Strategy == "free" {
+	// free with ONE fork is linear. Real's free strategy offers each
+	// host its next task in turn and queues the work; with a single
+	// worker only one task is ever in flight, so the hosts alternate
+	// strictly — every host does task N before any does task N+1,
+	// which is exactly what linear does. Measured: real's -f 1
+	// transcript for a free play is indistinguishable from a linear
+	// one, a single banner per task with both hosts under it.
+	//
+	// Running it through the linear path is therefore not an
+	// approximation, it is the same schedule — and it is
+	// DETERMINISTIC, where racing one goroutine per host for a single
+	// permit is not: ordering within a task came out three different
+	// ways across twenty runs.
+	if play.Strategy == "free" && e.Forks != 1 {
+		ec.free = true
 		runFree(ctx, ec, play, active, pr)
 		return ec.playAborted
 	}
@@ -1053,7 +1070,14 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 	// arbitrary — which defeats order: and makes `-f 1` output differ
 	// between runs. Real ansible-core at forks 1 runs hosts strictly in
 	// order, so this does too.
-	if ec.engine.Forks == 1 {
+	//
+	// NOT under strategy: free. There this function is called
+	// concurrently, once per host, so "there is no concurrency to
+	// gain" is false: the concurrency is the caller's, and skipping
+	// the limiter here removes the fork cap from free entirely. That
+	// is what let a fast host run its WHOLE task list while a slow one
+	// slept, where real alternates between them task by task.
+	if ec.engine.Forks == 1 && !ec.free {
 		for _, h := range runOn {
 			st := ec.states[h]
 			if ec.runTaskOnHost(ctx, task, st, pr, isHandler) {
