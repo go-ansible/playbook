@@ -7,8 +7,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
-github.com/go-ansible/facts v0.9.0 h1:ZeHs/+ui46d2NVq8Udz2bmpsmvPZDnwGbHMnu+daFi0=
-github.com/go-ansible/facts v0.9.0/go.mod h1:TL4yj8h9XXpEKhKUH/KDHVQc3E6+VLFnFAXrCTBkZfc=
+github.com/go-ansible/facts v0.10.0 h1:qTDgplmHfymO8aiGnENBZP8AEUbEec2g1Sfhs2+E1uQ=
+github.com/go-ansible/facts v0.10.0/go.mod h1:TL4yj8h9XXpEKhKUH/KDHVQc3E6+VLFnFAXrCTBkZfc=
 github.com/go-ansible/inventory v0.14.0 h1:dlmArlxXqUCcQ6iDJ2mZ0kQAG5wFCdK2oJHTYeTpbG4=
 github.com/go-ansible/inventory v0.14.0/go.mod h1:OcadTWKJ8RQtYRmOrqKitee6d9KuXfXZdRk0I2P3kyA=
 github.com/go-ansible/modules v0.51.0 h1:QxA+X6Rz/Br+kZyDcAenqj0ozBbUZ4Q9e9blfMT7koA=
