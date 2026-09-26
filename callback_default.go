@@ -71,6 +71,29 @@ func NewDefaultCallback(w io.Writer, color bool) *DefaultCallback {
 	return &DefaultCallback{w: w, color: color}
 }
 
+// colorizeLines wraps EVERY line of s in the colour, which is what
+// real does to a result and its body: a debug task's JSON comes back
+// as three separately-coloured lines, not one coloured header
+// followed by a plain block.
+//
+//	ESC[0;32mok: [h1] => {ESC[0m
+//	ESC[0;32m    "msg": "plain ok"ESC[0m
+//	ESC[0;32m}ESC[0m
+//
+// This port coloured only up to the host name and left the " => {…}"
+// plain. Nothing could see it: the differential corpus passed
+// --no-color to this side, so no coloured output was ever compared.
+func (c *DefaultCallback) colorizeLines(code, s string) string {
+	if !c.color {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = code + line + colorReset
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (c *DefaultCallback) colorize(code, s string) string {
 	if !c.color {
 		return s
@@ -108,7 +131,7 @@ func (c *DefaultCallback) OnPlayStart(play Play, hosts []string) {
 	if name != "" {
 		msg = "PLAY [" + name + "]"
 	}
-	fmt.Fprintf(c.w, "\n%s\n", c.colorize(colorCyan, msg))
+	fmt.Fprintf(c.w, "\n%s\n", msg)
 
 	// Real Ansible says so rather than printing nothing, so a mistyped
 	// host pattern is distinguishable from a play that genuinely had
@@ -193,9 +216,11 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 	case r.Skipped:
 		fmt.Fprintln(c.w, c.colorize(colorCyan, fmt.Sprintf("skipping: [%s]%s", r.Host, skippedItemLabel(r))))
 	case r.Changed:
-		fmt.Fprintln(c.w, c.colorize(colorYellow, fmt.Sprintf("changed: [%s]%s", hostLabel(r), itemLabel(r)))+c.verboseDump(r))
+		fmt.Fprintln(c.w, c.colorizeLines(colorYellow,
+			fmt.Sprintf("changed: [%s]%s", hostLabel(r), itemLabel(r))+c.verboseDump(r)))
 	default:
-		fmt.Fprintln(c.w, c.colorize(colorGreen, fmt.Sprintf("ok: [%s]%s", hostLabel(r), itemLabel(r)))+c.verboseDump(r))
+		fmt.Fprintln(c.w, c.colorizeLines(colorGreen,
+			fmt.Sprintf("ok: [%s]%s", hostLabel(r), itemLabel(r))+c.verboseDump(r)))
 	}
 }
 
@@ -219,7 +244,7 @@ func (c *DefaultCallback) taskBanner(r Result) {
 	// name still gets its own banner.
 	if key := kind + " [" + banner + "]"; key != c.lastTask {
 		c.flushPendingIgnore()
-		fmt.Fprintf(c.w, "\n%s\n", c.colorize(colorCyan, key))
+		fmt.Fprintf(c.w, "\n%s\n", key)
 		c.lastTask = key
 	}
 }
@@ -246,7 +271,7 @@ func (c *DefaultCallback) OnStats(rr *RunResult) {
 	c.flushPendingIgnore()
 
 	fmt.Fprintln(c.w)
-	fmt.Fprintln(c.w, c.colorize(colorCyan, "PLAY RECAP"))
+	fmt.Fprintln(c.w, "PLAY RECAP")
 
 	summary := rr.Summary()
 	hosts := make([]string, 0, len(summary))

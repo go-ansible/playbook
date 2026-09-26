@@ -115,7 +115,11 @@ func TestDefaultCallbackColor(t *testing.T) {
 	cb := NewDefaultCallback(&buf, true)
 	cb.OnTaskResult(Result{Host: "web1", Task: "install", Changed: true})
 
-	want := "\n\033[0;36mTASK [install]\033[0m\n\033[0;33mchanged: [web1]\033[0m\n"
+	// The BANNER is not coloured: measured with ANSIBLE_FORCE_COLOR
+	// against ansible-core 2.21.4, which colours results and the recap
+	// counts but leaves PLAY, TASK and PLAY RECAP plain. This asserted
+	// a cyan banner, which was this port's own invention.
+	want := "\nTASK [install]\n\033[0;33mchanged: [web1]\033[0m\n"
 	if got := buf.String(); got != want {
 		t.Errorf("colored output = %q, want %q", got, want)
 	}
@@ -695,7 +699,7 @@ func TestDefaultCallbackRecapColors(t *testing.T) {
 				Plays: []PlayResult{{Results: tc.results, Rescued: tc.rescued}},
 			})
 			got := buf.String()
-			_, line, ok := strings.Cut(got, "PLAY RECAP\033[0m\n")
+			_, line, ok := strings.Cut(got, "PLAY RECAP\n")
 			if !ok {
 				t.Fatalf("no recap banner in %q", got)
 			}
@@ -1575,5 +1579,56 @@ func TestLoopedArgsFailureSaysIgnoringOnce(t *testing.T) {
 	}
 	if n := strings.Count(buf.String(), "...ignoring"); n != 1 {
 		t.Errorf(`"...ignoring" appeared %d times, want 1:\n%s`, n, buf.String())
+	}
+}
+
+// Real colours EVERY line of a result and its body, not just the
+// header. Captured with ANSIBLE_FORCE_COLOR from ansible-core 2.21.4
+// for a debug task:
+//
+//	ESC[0;32mok: [h1] => {ESC[0m
+//	ESC[0;32m    "msg": "plain ok"ESC[0m
+//	ESC[0;32m}ESC[0m
+//
+// This port coloured up to the host name and left the body plain. The
+// differential corpus could not see it, because it passed --no-color
+// to this side and nothing to real's.
+func TestResultBodyIsColouredLineByLine(t *testing.T) {
+	var buf bytes.Buffer
+	cb := NewDefaultCallback(&buf, true)
+	cb.OnTaskResult(Result{
+		Host: "h1", Task: "t", Msg: "plain ok",
+		Extra: map[string]any{verboseAlwaysKey: true},
+	})
+	got := buf.String()
+	for _, line := range strings.Split(strings.TrimSuffix(got, "\n"), "\n") {
+		if line == "" || strings.HasPrefix(line, "TASK") {
+			continue
+		}
+		if !strings.HasPrefix(line, "\033[0;32m") || !strings.HasSuffix(line, "\033[0m") {
+			t.Errorf("line not wrapped in the result colour: %q\nwhole output: %q", line, got)
+		}
+	}
+	// And the body really is there -- a test that passed because
+	// nothing was printed would prove nothing.
+	if !strings.Contains(got, "plain ok") {
+		t.Fatalf("no body in %q", got)
+	}
+	if strings.Count(got, "\033[0;32m") < 3 {
+		t.Errorf("want at least three coloured lines (header, body, brace): %q", got)
+	}
+}
+
+// Uncoloured, the same result carries no escape at all -- the
+// line-by-line wrapper must not leak one in.
+func TestResultBodyUncolouredHasNoEscapes(t *testing.T) {
+	var buf bytes.Buffer
+	cb := NewDefaultCallback(&buf, false)
+	cb.OnTaskResult(Result{
+		Host: "h1", Task: "t", Msg: "plain ok",
+		Extra: map[string]any{verboseAlwaysKey: true},
+	})
+	if strings.Contains(buf.String(), "\033[") {
+		t.Errorf("escape sequence in uncoloured output: %q", buf.String())
 	}
 }
