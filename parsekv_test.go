@@ -1,6 +1,7 @@
 package playbook
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
@@ -134,16 +135,42 @@ func TestTaskParsesKeyValueArguments(t *testing.T) {
 	}
 }
 
-func TestTaskRejectsRawParamsForAModuleThatCannotTakeThem(t *testing.T) {
-	// Real: Action 'ansible.builtin.debug' does not support raw params.
-	// Silently dropping them made `debug: hello there` print debug's
-	// default message where real stops the play.
-	if _, err := parseTasksYAML(t, "- debug: hello there\n"); err == nil {
-		t.Error("accepted raw params for debug")
+func TestTaskRecordsRawParamsRefusalForTheRun(t *testing.T) {
+	// Real raises this when the TASK RUNS, not while parsing: a
+	// playbook holding such a task parses fine and its earlier tasks
+	// still run. So parsing records the message and the engine raises
+	// it -- see TestRawParamsFailsTheTaskNotTheParse.
+	tasks, err := parseTasksYAML(t, "- debug: hello there\n")
+	if err != nil {
+		t.Fatalf("parsing rejected the playbook: %v", err)
+	}
+	want := "Action 'ansible.builtin.debug' does not support raw params."
+	if tasks[0].ArgsError != want {
+		t.Errorf("ArgsError = %q, want %q", tasks[0].ArgsError, want)
+	}
+	// The action: form records the same refusal.
+	tasks, err = parseTasksYAML(t, "- action: debug hello there\n")
+	if err != nil {
+		t.Fatalf("parsing rejected the action form: %v", err)
+	}
+	if tasks[0].ArgsError != want {
+		t.Errorf("action ArgsError = %q, want %q", tasks[0].ArgsError, want)
 	}
 	// set_fact is on real's RAW_PARAM_MODULES, so it may have them.
-	if _, err := parseTasksYAML(t, "- set_fact: myvar=fromkv\n"); err != nil {
-		t.Errorf("set_fact k=v rejected: %v", err)
+	tasks, err = parseTasksYAML(t, "- set_fact: myvar=fromkv\n")
+	if err != nil {
+		t.Fatalf("set_fact k=v rejected: %v", err)
+	}
+	if tasks[0].ArgsError != "" {
+		t.Errorf("set_fact refused: %q", tasks[0].ArgsError)
+	}
+	// And a module that legitimately has none records nothing.
+	tasks, err = parseTasksYAML(t, "- debug: msg=fine\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tasks[0].ArgsError != "" {
+		t.Errorf("a clean k=v task was refused: %q", tasks[0].ArgsError)
 	}
 }
 
@@ -187,5 +214,95 @@ func TestSearchPathForRoleAndPlayTasks(t *testing.T) {
 	empty := vars.New()
 	if got := searchPath(Task{}, empty); len(got) != 0 {
 		t.Errorf("search path without playbook_dir = %v, want empty", got)
+	}
+}
+
+// The ordering, measured from real: a playbook holding a raw-params
+// refusal still parses, the tasks BEFORE it run, one with when: false
+// is SKIPPED rather than failed, the live one fails, and ignore_errors
+// lets the play carry on.
+func TestRawParamsFailsTheTaskNotTheParse(t *testing.T) {
+	pb, err := Parse([]byte(`
+- name: raw params ordering
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: before
+      debug: msg=ok
+    - name: skipped raw params
+      debug: hello there
+      when: false
+    - name: live raw params
+      debug: hello there
+      ignore_errors: true
+    - name: after
+      debug: msg=end
+`))
+	if err != nil {
+		t.Fatalf("the playbook did not parse: %v", err)
+	}
+
+	var got []Result
+	e := New(localhostInventory())
+	e.OnResult = func(r Result) { got = append(got, r) }
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got) != 4 {
+		t.Fatalf("got %d results, want 4: %+v", len(got), got)
+	}
+	if got[0].Failed || got[0].Skipped {
+		t.Errorf("the task before the refusal did not run: %+v", got[0])
+	}
+	if !got[1].Skipped || got[1].Failed {
+		t.Errorf("when: false did not skip the refusal: %+v", got[1])
+	}
+	if !got[2].Failed {
+		t.Errorf("the live refusal did not fail: %+v", got[2])
+	}
+	want := "Task failed: Action 'ansible.builtin.debug' does not support raw params."
+	if got[2].Msg != want {
+		t.Errorf("msg = %q, want %q", got[2].Msg, want)
+	}
+	// ignore_errors let the play reach the last task.
+	if got[3].Failed || got[3].Skipped {
+		t.Errorf("the play stopped at the refusal: %+v", got[3])
+	}
+}
+
+// A strict lookup failure reaches the user as real words it, with none
+// of gonja's own call-stack prose in front. Measured from real:
+//
+//	Task failed: Finalization of task args for 'ansible.builtin.debug'
+//	failed: Error while resolving value for 'msg': The lookup plugin
+//	'file' failed: Unable to access the file 'nope.txt': File not
+//	found. Use -vvvvv to see paths searched.
+func TestLookupFailureReachesTheUserAsRealWordsIt(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - debug:
+        msg: "{{ lookup('file', 'definitely-not-here.txt') }}"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []Result
+	e := New(localhostInventory())
+	e.OnResult = func(r Result) { got = append(got, r) }
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !got[0].Failed {
+		t.Fatalf("want one failed result, got %+v", got)
+	}
+	want := "Task failed: Finalization of task args for 'ansible.builtin.debug' failed: " +
+		"Error while resolving value for 'msg': The lookup plugin 'file' failed: " +
+		"Unable to access the file 'definitely-not-here.txt': File not found. " +
+		"Use -vvvvv to see paths searched."
+	if got[0].Msg != want {
+		t.Errorf("msg  = %q\nwant = %q", got[0].Msg, want)
 	}
 }
