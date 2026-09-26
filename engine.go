@@ -2454,7 +2454,19 @@ func resultToMap(r modules.Result) map[string]any {
 	out := map[string]any{
 		"changed": r.Changed,
 		"failed":  r.Failed,
-		"msg":     r.Msg,
+	}
+	// A module that says nothing gets no "msg" key, because real's
+	// results do not have one: `file` returns changed/state/mode and
+	// friends, and referencing r.msg there is an UNDEFINED variable in
+	// real while this port answered "". That is the leniency this
+	// campaign keeps finding -- a playbook that reads the wrong field
+	// gets an empty string instead of the error real raises.
+	//
+	// A module that genuinely reports an empty message says so through
+	// Extra, which is applied below and can put the key back:
+	// lineinfile does exactly that when it changed nothing.
+	if r.Msg != "" {
+		out["msg"] = r.Msg
 	}
 	for k, v := range r.Extra {
 		out[k] = v
