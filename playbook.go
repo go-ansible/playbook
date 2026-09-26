@@ -144,6 +144,12 @@ type RoleRef struct {
 // task's YAML mapping carried (e.g. `copy:` or `command:`) — empty for
 // a block/meta task.
 type Task struct {
+	// ID identifies this task INSTANCE within its play, which is not
+	// the same thing as its name: two unnamed `- debug:` tasks in a row
+	// both display as "debug", and real banners each of them. Numbered
+	// after parsing, so a block's children are numbered too.
+	ID int
+
 	Name   string
 	Module string
 	Args   map[string]any
@@ -486,6 +492,11 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 	p.Handlers = append(append([]Task{}, roleHandlers...), handlers...)
 
 	propagateTags(p.Tags, p.Tasks)
+	// Handlers are numbered from the same sequence as the tasks, so a
+	// handler can never collide with the task that notified it.
+	seq := 0
+	numberTasks(&seq, p.Tasks)
+	numberTasks(&seq, p.Handlers)
 	propagateModuleDefaults(p.ModuleDefaults, p.Tasks)
 	propagateModuleDefaults(p.ModuleDefaults, p.Handlers)
 
@@ -637,6 +648,22 @@ func (t Task) argsWithDefaults() map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// numberTasks gives every task a distinct ID within its play, so the
+// callback can tell one task from the next when both display the same
+// name. IDs start at 1: a zero ID means "not numbered", which is what a
+// Result built by hand in a test carries.
+func numberTasks(seq *int, tasks []Task) {
+	for i := range tasks {
+		*seq++
+		tasks[i].ID = *seq
+		if tasks[i].IsBlock() {
+			numberTasks(seq, tasks[i].Block)
+			numberTasks(seq, tasks[i].Rescue)
+			numberTasks(seq, tasks[i].Always)
+		}
+	}
 }
 
 func propagateTags(inherited []string, tasks []Task) {

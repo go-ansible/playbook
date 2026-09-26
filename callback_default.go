@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -240,11 +241,26 @@ func (c *DefaultCallback) taskBanner(r Result) {
 	if r.Handler {
 		kind = "RUNNING HANDLER"
 	}
-	// The kind is part of the identity: a handler that shares a task's
-	// name still gets its own banner.
-	if key := kind + " [" + banner + "]"; key != c.lastTask {
+	// What is banner-worthy is a new TASK, not a new task NAME. Real
+	// prints one banner per task and shares it across the play's hosts,
+	// so two unnamed `- debug:` tasks in a row get two banners though
+	// both display as "debug" -- measured, both under the linear
+	// strategy and under free. Keying on the displayed name printed one
+	// banner for the pair and then hid every later one.
+	//
+	// The kind is part of the identity too: a handler that shares a
+	// task's name still gets its own banner.
+	//
+	// A Result with no TaskID -- one built by hand in a test, or by a
+	// caller that predates the field -- falls back to the name, which
+	// is what this did for everything before.
+	key := kind + " [" + banner + "]"
+	if r.TaskID != 0 {
+		key = kind + " #" + strconv.Itoa(r.TaskID) + " [" + banner + "]"
+	}
+	if key != c.lastTask {
 		c.flushPendingIgnore()
-		fmt.Fprintf(c.w, "\n%s\n", key)
+		fmt.Fprintf(c.w, "\n%s [%s]\n", kind, banner)
 		c.lastTask = key
 	}
 }

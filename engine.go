@@ -693,7 +693,7 @@ func (ec *execCtx) ignoreUnreachable(task Task) bool {
 func (ec *execCtx) reportUnreachable(pr *PlayResult, st *hostState, task Task, err error) bool {
 	ignored := ec.ignoreUnreachable(task)
 	ec.report(pr, Result{
-		Host: st.name, Task: task.Name, Module: task.Module,
+		Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module,
 		Failed: true, Unreachable: true, Ignored: ignored, Msg: err.Error(),
 	})
 	if ignored {
@@ -833,13 +833,13 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 			st := ec.states[h]
 			ok, err := ec.evalWhen(task.When, ec.engine.resolved(st.vc.Merged()))
 			if err != nil {
-				ec.report(pr, Result{Host: h, Task: task.Name, Failed: true, Msg: conditionalFailure("when", err)})
+				ec.report(pr, Result{Host: h, Task: task.Name, TaskID: task.ID, Failed: true, Msg: conditionalFailure("when", err)})
 				continue
 			}
 			if ok {
 				passed = append(passed, h)
 			} else {
-				ec.report(pr, Result{Host: h, Task: task.Name, Skipped: true})
+				ec.report(pr, Result{Host: h, Task: task.Name, TaskID: task.ID, Skipped: true})
 			}
 		}
 		active = passed
@@ -863,7 +863,7 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 	if task.IncludedFile != "" {
 		for _, h := range active {
 			ec.report(pr, Result{
-				Host: h, Task: task.Name,
+				Host: h, Task: task.Name, TaskID: task.ID,
 				Included: task.IncludedFile,
 			})
 		}
@@ -1353,11 +1353,11 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 	if task.When != "" && task.Loop == nil {
 		ok, err := ec.evalWhen(task.When, ec.engine.resolved(scope.Merged()))
 		if err != nil {
-			ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: conditionalFailure("when", err)})
+			ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: conditionalFailure("when", err)})
 			return !task.IgnoreErrors
 		}
 		if !ok {
-			ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Skipped: true})
+			ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, Skipped: true})
 			return false
 		}
 	}
@@ -1370,9 +1370,9 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 	// runDirective: reporting the meta result afterwards put the
 	// handler's own banner above the meta task's.
 	if modules.NormalizeName(task.Module) == "meta" {
-		ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, BannerOnly: true})
+		ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, BannerOnly: true})
 		if err := ec.runMeta(ctx, task.Args, st, pr); err != nil {
-			ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: err.Error()})
+			ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: err.Error()})
 			st.failed = true
 			return !task.IgnoreErrors
 		}
@@ -1384,7 +1384,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 	if looping {
 		rendered, err := ec.engine.Template.RenderValue(task.Loop, ec.engine.resolved(scope.Merged()))
 		if err != nil {
-			ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: "loop: " + err.Error()})
+			ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: "loop: " + err.Error()})
 			return !task.IgnoreErrors
 		}
 		if list, ok := rendered.([]any); ok {
@@ -1399,7 +1399,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		if task.LoopWith != "" {
 			produced, lerr := ec.engine.Template.Lookup(task.LoopWith, items, ec.engine.resolved(scope.Merged()), nil)
 			if lerr != nil {
-				ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors,
+				ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors,
 					Msg: "with_" + task.LoopWith + ": " + lerr.Error()})
 				return !task.IgnoreErrors
 			}
@@ -1453,7 +1453,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			if task.When != "" {
 				ok, werr := ec.evalWhen(task.When, ec.engine.resolved(iter.Merged()))
 				if werr != nil {
-					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: conditionalFailure("when", werr), Item: item, ItemLabel: label, LoopVar: task.LoopVar, Looped: true})
+					ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: conditionalFailure("when", werr), Item: item, ItemLabel: label, LoopVar: task.LoopVar, Looped: true})
 					anyFailed = true
 					if !task.IgnoreErrors {
 						break
@@ -1461,7 +1461,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 					continue
 				}
 				if !ok {
-					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Skipped: true, Item: item, ItemLabel: label, LoopVar: task.LoopVar, Looped: true})
+					ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, Skipped: true, Item: item, ItemLabel: label, LoopVar: task.LoopVar, Looped: true})
 					continue
 				}
 			}
@@ -1504,7 +1504,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				// summary belongs to an args-finalization failure and
 				// NOT to a module failure, which ends on its per-item
 				// lines alone.
-				ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module,
+				ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module,
 					Failed: true, Ignored: task.IgnoreErrors, Msg: err.Error(),
 					Item: item, ItemLabel: label, LoopVar: task.LoopVar, Looped: looping,
 					ArgsFailed: true})
@@ -1521,7 +1521,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			var derr error
 			result, handled, derr = ec.runDirective(ctx, task, st, args, mergedVars, pr)
 			if derr != nil {
-				ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: derr.Error()})
+				ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: derr.Error()})
 				anyFailed = true
 				aborted = true
 				break
@@ -1542,7 +1542,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				conn, dname, cerr := ec.connectionFor(ctx, task, mergedVars, st)
 				delegate = dname
 				if cerr != nil {
-					ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: cerr.Error(), Delegate: delegate})
+					ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: cerr.Error(), Delegate: delegate})
 					anyFailed = true
 					aborted = true
 					break
@@ -1636,7 +1636,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				// its final failure. totalAttempts is 1 + retries.
 				for _, cb := range ec.engine.Callbacks {
 					cb.OnTaskRetry(Result{
-						Host: st.name, Task: task.Name, Module: task.Module,
+						Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module,
 						Failed: true, Msg: result.Msg, Extra: result.Extra,
 						Delegate: delegate,
 					}, totalAttempts-1-attempt)
@@ -1705,7 +1705,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		}
 
 		ec.report(pr, Result{
-			Host: st.name, Task: task.Name, Module: task.Module,
+			Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module,
 			Changed: result.Changed, Failed: result.Failed,
 			Skipped: result.Skipped,
 			Ignored: result.Failed && task.IgnoreErrors,
@@ -1800,7 +1800,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 	// ways, which is why this keys on argsFailed rather than on
 	// anyFailed.
 	if argsFailed {
-		ec.report(pr, Result{Host: st.name, Task: task.Name, Module: task.Module,
+		ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module,
 			Failed: true, Ignored: task.IgnoreErrors, Msg: "One or more items failed",
 			ArgsFailed: true, DisplayOnly: true})
 	}
