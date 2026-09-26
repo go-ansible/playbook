@@ -793,9 +793,16 @@ func moduleFromValue(v any) (string, map[string]any, error) {
 		if name == "" {
 			return "", nil, errors.New("names no module")
 		}
-		args := map[string]any{}
-		if rest = strings.TrimSpace(rest); rest != "" {
-			args["_raw_params"] = rest
+		// The remainder is k=v, exactly as it is after a module key:
+		// real runs parse_kv here too (parsing/mod_args.py). Taking the
+		// whole remainder as _raw_params made `action: debug msg=x`
+		// print debug's default message instead of x.
+		args, err := parseKV(strings.TrimSpace(rest), freeformActions[name])
+		if err != nil {
+			return "", nil, err
+		}
+		if _, hasRaw := args["_raw_params"]; hasRaw && !rawParamModules[name] {
+			return "", nil, fmt.Errorf("Action %q does not support raw params.", name)
 		}
 		return name, args, nil
 	case map[string]any:
@@ -1008,7 +1015,20 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 	case nil:
 		t.Args = map[string]any{}
 	case string:
-		t.Args = map[string]any{"_raw_params": v}
+		// The k=v form. It used to become _raw_params whole, so `file:
+		// path=/tmp/x state=touch` reached the module with no path --
+		// see parsekv.go. checkRaw is on only for the modules whose
+		// argument string is a command line.
+		args, err := parseKV(v, freeformActions[t.Module])
+		if err != nil {
+			return t, fmt.Errorf("task %q: module %q: %w", t.Name, moduleKey, err)
+		}
+		// Real refuses raw params for a module that does not take them,
+		// rather than passing an argument the module will not read.
+		if _, hasRaw := args["_raw_params"]; hasRaw && !rawParamModules[t.Module] {
+			return t, fmt.Errorf("Action %q does not support raw params.", t.Module)
+		}
+		t.Args = args
 	default:
 		return t, fmt.Errorf("task %q: module %q: unsupported argument shape %T", t.Name, moduleKey, v)
 	}
