@@ -1374,6 +1374,24 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		}
 	}
 
+	// An argument refusal found while parsing, raised now rather than
+	// then: real parses such a playbook fine, runs the tasks before
+	// this one, SKIPS this one when its when: is false, and fails it
+	// per host otherwise -- measured. It sits after the when: gate for
+	// exactly that reason.
+	//
+	// A looping task fails once here rather than once per item. Real
+	// finalizes arguments per item, so it would report one failure per
+	// iteration; a loop over a module that cannot take raw params is
+	// not a shape the corpus has, and guessing at it is worse than
+	// saying so.
+	if task.ArgsError != "" {
+		ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module,
+			Failed: true, Ignored: task.IgnoreErrors, Msg: "Task failed: " + task.ArgsError})
+		st.failed = true
+		return !task.IgnoreErrors
+	}
+
 	// meta is not a module at all — real Ansible's strategy executes it
 	// directly. It banners its task and reports NO result line, and
 	// contributes nothing to the recap. flush_handlers runs its
@@ -2956,12 +2974,27 @@ func fqcn(module string) string {
 	return "ansible.builtin." + module
 }
 
+// lookupFailurePrefix is how the template package words a strict
+// lookup failure, which is how real words it. Shared here as a constant
+// because it is a contract between the two packages, not a coincidence.
+const lookupFailurePrefix = "The lookup plugin '"
+
 // innermost strips this port's own wrapping off a template error, so
 // the message ends on the part real also prints — "'nope' is
 // undefined" — rather than on three layers of Go context in front of
 // it.
 func innermost(err error) error {
 	msg := err.Error()
+	// A lookup that failed names itself: the template package words its
+	// strict failure exactly as real does, "The lookup plugin 'x'
+	// failed: ...", precisely so this can find it. Everything in front
+	// is gonja describing its own call stack, which real has no
+	// equivalent of and never prints. Cutting on a BOUNDARY the other
+	// side guarantees beats a list of prose fragments to strip, which
+	// silently stops matching the day gonja rewords one of them.
+	if i := strings.Index(msg, lookupFailurePrefix); i >= 0 {
+		return errors.New(msg[i:])
+	}
 	if i := strings.LastIndex(msg, ": "); i >= 0 {
 		if tail := msg[i+2:]; strings.HasSuffix(tail, "is undefined") {
 			return errors.New(tail)

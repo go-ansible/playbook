@@ -272,6 +272,13 @@ type Task struct {
 	// line needs.
 	IncludedFile string
 
+	// ArgsError is a refusal discovered while parsing the task's
+	// arguments that real only raises when the task RUNS. Kept as a
+	// message rather than an error so the playbook still parses: real
+	// runs the tasks before it, and skips this one entirely when its
+	// when: is false.
+	ArgsError string
+
 	// RoleDir is the directory of the role this task came from, empty
 	// for a task written directly in a playbook. A relative src: on a
 	// file-carrying module resolves against it — real Ansible looks in
@@ -828,9 +835,6 @@ func moduleFromValue(v any) (string, map[string]any, error) {
 		if err != nil {
 			return "", nil, err
 		}
-		if _, hasRaw := args["_raw_params"]; hasRaw && !rawParamModules[name] {
-			return "", nil, fmt.Errorf("Action %q does not support raw params.", name)
-		}
 		return name, args, nil
 	case map[string]any:
 		name, _ := val["module"].(string)
@@ -847,6 +851,13 @@ func moduleFromValue(v any) (string, map[string]any, error) {
 	default:
 		return "", nil, fmt.Errorf("want a string or a mapping, got %T", v)
 	}
+}
+
+// rawParamsRefusal is real's own wording for a module handed a
+// free-form argument it cannot take. The module is named by its
+// fully-qualified name and quoted with apostrophes, as real prints it.
+func rawParamsRefusal(module string) string {
+	return "Action '" + fqcn(module) + "' does not support raw params."
 }
 
 // withExtraArgs folds an args: mapping into the task's arguments.
@@ -1004,6 +1015,11 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 			return t, fmt.Errorf("task %q: %s: %w", t.Name, key, err)
 		}
 		t.Module, t.Args = name, args
+		// Same refusal as the module-key form, recorded for the run
+		// rather than raised here.
+		if _, hasRaw := args["_raw_params"]; hasRaw && !rawParamModules[name] {
+			t.ArgsError = rawParamsRefusal(name)
+		}
 		if key == "local_action" && t.DelegateTo == "" {
 			t.DelegateTo = "localhost"
 		}
@@ -1050,10 +1066,14 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 		if err != nil {
 			return t, fmt.Errorf("task %q: module %q: %w", t.Name, moduleKey, err)
 		}
-		// Real refuses raw params for a module that does not take them,
-		// rather than passing an argument the module will not read.
+		// Real refuses raw params for a module that does not take them
+		// -- but when the TASK RUNS, not while parsing. Measured: a
+		// playbook holding such a task still parses, its earlier tasks
+		// still run, the offending one fails per host, and with
+		// `when: false` it is SKIPPED rather than failed. Rejecting it
+		// here produced no output at all for the whole playbook.
 		if _, hasRaw := args["_raw_params"]; hasRaw && !rawParamModules[t.Module] {
-			return t, fmt.Errorf("Action %q does not support raw params.", t.Module)
+			t.ArgsError = rawParamsRefusal(t.Module)
 		}
 		t.Args = args
 	default:
