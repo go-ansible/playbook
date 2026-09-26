@@ -1632,3 +1632,99 @@ func TestResultBodyUncolouredHasNoEscapes(t *testing.T) {
 		t.Errorf("escape sequence in uncoloured output: %q", buf.String())
 	}
 }
+
+// Measured from real: one banner per TASK, shared across the play's
+// hosts, and a second banner for a second task even when both display
+// the same name. Two unnamed `- debug:` tasks in a row are the common
+// way to hit this, and this port printed a single banner for the pair.
+func TestDefaultCallbackBannersPerTaskNotPerName(t *testing.T) {
+	var buf bytes.Buffer
+	cb := NewDefaultCallback(&buf, false)
+	cb.OnPlayStart(Play{Name: "p"}, []string{"h1", "h2"})
+	// Task 1 on both hosts, then task 2 on both hosts. Both unnamed, so
+	// both display as "debug".
+	cb.OnTaskResult(Result{Host: "h1", TaskID: 1, Module: "debug"})
+	cb.OnTaskResult(Result{Host: "h2", TaskID: 1, Module: "debug"})
+	cb.OnTaskResult(Result{Host: "h1", TaskID: 2, Module: "debug"})
+	cb.OnTaskResult(Result{Host: "h2", TaskID: 2, Module: "debug"})
+
+	if n := strings.Count(buf.String(), "TASK [debug]"); n != 2 {
+		t.Errorf("TASK banners = %d, want 2 (one per task, shared across hosts)\n%s", n, buf.String())
+	}
+	// And the banner text itself must not carry the id.
+	if strings.Contains(buf.String(), "#1") || strings.Contains(buf.String(), "#2") {
+		t.Errorf("the task id leaked into the printed banner:\n%s", buf.String())
+	}
+}
+
+func TestDefaultCallbackBannersTwoTasksSharingAName(t *testing.T) {
+	var buf bytes.Buffer
+	cb := NewDefaultCallback(&buf, false)
+	cb.OnPlayStart(Play{Name: "p"}, []string{"h1"})
+	cb.OnTaskResult(Result{Host: "h1", TaskID: 1, Task: "same"})
+	cb.OnTaskResult(Result{Host: "h1", TaskID: 2, Task: "same"})
+
+	if n := strings.Count(buf.String(), "TASK [same]"); n != 2 {
+		t.Errorf("TASK banners = %d, want 2", n)
+	}
+}
+
+func TestDefaultCallbackFallsBackToTheNameWithoutATaskID(t *testing.T) {
+	// A Result built by hand, or by a caller older than TaskID, keeps
+	// the behaviour this had before: dedupe on the displayed name.
+	var buf bytes.Buffer
+	cb := NewDefaultCallback(&buf, false)
+	cb.OnPlayStart(Play{Name: "p"}, []string{"h1", "h2"})
+	cb.OnTaskResult(Result{Host: "h1", Task: "shared"})
+	cb.OnTaskResult(Result{Host: "h2", Task: "shared"})
+
+	if n := strings.Count(buf.String(), "TASK [shared]"); n != 1 {
+		t.Errorf("TASK banners = %d, want 1", n)
+	}
+}
+
+// Numbering happens after parsing, so a block's children are numbered
+// too and nothing shares an id with a handler.
+func TestParseNumbersEveryTaskDistinctly(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - debug: msg=a
+    - block:
+        - debug: msg=b
+        - debug: msg=c
+      rescue:
+        - debug: msg=d
+      always:
+        - debug: msg=e
+  handlers:
+    - name: h
+      debug: msg=f
+`))
+	if err != nil {
+		t.Fatalf("parsing: %v", err)
+	}
+	seen := map[int]bool{}
+	var walk func([]Task)
+	walk = func(ts []Task) {
+		for _, task := range ts {
+			if task.ID == 0 {
+				t.Errorf("task %q/%q was not numbered", task.Name, task.Module)
+			}
+			if seen[task.ID] {
+				t.Errorf("task id %d used twice", task.ID)
+			}
+			seen[task.ID] = true
+			walk(task.Block)
+			walk(task.Rescue)
+			walk(task.Always)
+		}
+	}
+	walk(pb[0].Tasks)
+	walk(pb[0].Handlers)
+	// 1 debug + 1 block + 4 nested + 1 handler.
+	if len(seen) != 7 {
+		t.Errorf("numbered %d tasks, want 7: %v", len(seen), seen)
+	}
+}

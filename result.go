@@ -9,7 +9,15 @@ import (
 // Result is one task's outcome on one host (one per loop iteration when
 // a task loops).
 type Result struct {
-	Host    string
+	Host string
+
+	// TaskID is the ID of the task INSTANCE this result came from. The
+	// callback banners on it rather than on Task, because two unnamed
+	// tasks of the same module display the same name and real banners
+	// each one. Zero means unnumbered, and the callback then falls back
+	// to the displayed name.
+	TaskID int
+
 	Task    string
 	Module  string
 	Changed bool
