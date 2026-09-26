@@ -1338,6 +1338,18 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 	st.currentTask = task
 	scope := st.vc.Child()
 	scope.Set(vars.TaskVars, task.Vars)
+	// The directories a lookup resolves a relative file against. Real
+	// exposes this as a magic variable and its file lookup reads it
+	// from there, so setting it is the whole mechanism -- measured:
+	// a role task sees [<role>, <role>/tasks, <playbook_dir>] and a
+	// play task sees [<playbook_dir>]. The working directory is NOT on
+	// it, in real or here.
+	scope.SetVar(vars.TaskVars, "ansible_search_path", searchPath(task, st.vc))
+	if task.RoleDir != "" {
+		// find_file_in_search_path keys is_role off this variable's
+		// presence, and a role task is the only place real sets it.
+		scope.SetVar(vars.TaskVars, "role_path", task.RoleDir)
+	}
 
 	// A task that does NOT loop evaluates its when: once, here. A
 	// looping one evaluates it PER ITEM instead (below), because the
@@ -2331,6 +2343,23 @@ func failedTaskDict(t Task, play Play, connection string) map[string]any {
 		"throttle":       0,
 		"timeout":        0,
 	}
+}
+
+// searchPath builds real's ansible_search_path for one task: the role
+// it came from first, then the role's tasks/ directory, then the
+// playbook's own. Measured against real -- the order decides which of
+// several same-named files a lookup reads, and the working directory
+// is absent from it deliberately.
+func searchPath(task Task, vc *vars.Context) []any {
+	playbookDir, _ := vc.Merged()["playbook_dir"].(string)
+	var out []any
+	if task.RoleDir != "" {
+		out = append(out, task.RoleDir, filepath.Join(task.RoleDir, "tasks"))
+	}
+	if playbookDir != "" {
+		out = append(out, playbookDir)
+	}
+	return out
 }
 
 func (ec *execCtx) report(pr *PlayResult, r Result) {
