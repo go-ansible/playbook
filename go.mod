@@ -3,9 +3,9 @@ module github.com/go-ansible/playbook
 go 1.26.4
 
 require (
-	github.com/go-ansible/facts v0.12.0
+	github.com/go-ansible/facts v0.13.0
 	github.com/go-ansible/inventory v0.14.0
-	github.com/go-ansible/modules v0.55.0
+	github.com/go-ansible/modules v0.56.0
 	github.com/go-ansible/template v0.25.0
 	github.com/go-ansible/vars v0.1.2
 	github.com/go-ansible/vault v0.7.0
