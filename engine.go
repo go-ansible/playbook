@@ -1577,7 +1577,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 					aborted = true
 					break
 				}
-				resolveRoleSrc(task, args)
+				resolveLocalSrc(task, args, searchPathDirs(task, st.vc))
 				// Real Ansible sends _ansible_diff to every module,
 				// whether or not it knows what to do with one.
 				if ec.engine.DiffMode && args != nil {
@@ -2369,8 +2369,21 @@ func failedTaskDict(t Task, play Play, connection string) map[string]any {
 // several same-named files a lookup reads, and the working directory
 // is absent from it deliberately.
 func searchPath(task Task, vc *vars.Context) []any {
+	dirs := searchPathDirs(task, vc)
+	out := make([]any, len(dirs))
+	for i, d := range dirs {
+		out[i] = d
+	}
+	return out
+}
+
+// searchPathDirs is the same list as []string, for the callers inside
+// this package that resolve a path rather than publish a variable. One
+// function builds it, so the directories a lookup searches and the
+// directories a copy: searches cannot drift apart.
+func searchPathDirs(task Task, vc *vars.Context) []string {
 	playbookDir, _ := vc.Merged()["playbook_dir"].(string)
-	var out []any
+	var out []string
 	if task.RoleDir != "" {
 		out = append(out, task.RoleDir, filepath.Join(task.RoleDir, "tasks"))
 	}
@@ -2562,46 +2575,113 @@ func contains(list []string, s string) bool {
 	return false
 }
 
-// roleSrcDirs names, per module, the role subdirectory real Ansible
-// searches for a relative src:. These are the file-carrying modules
-// whose src is a path on the CONTROLLER; a module whose src names
-// something on the target (or a URL) must not appear here.
-var roleSrcDirs = map[string]string{
+// localSrcDirs names, per module, the subdirectory real Ansible searches
+// for a relative local source. These are the file-carrying modules whose
+// source is a path on the CONTROLLER; a module whose src names something
+// on the target (or a URL) must not appear here.
+//
+// Measured, with the same filename in every layer at once and the winner
+// removed each round: copy and script take files/, template takes
+// templates/, and each is tried before the bare directory.
+var localSrcDirs = map[string]string{
 	"copy":      "files",
 	"script":    "files",
 	"unarchive": "files",
 	"template":  "templates",
 }
 
-// resolveRoleSrc rewrites a relative src: to the role's own copy of the
-// file, which is what makes `copy: {src: hello.txt}` inside a role find
-// roles/<name>/files/hello.txt. Real Ansible searches the role's
-// files/ (templates/ for template) first; this port searched only the
-// process working directory, so the task failed outright with "no such
-// file or directory" for every role that ships a file.
+// resolveLocalSrc rewrites a relative local source to the file the task
+// actually means, searching the same directories real does and in the
+// same order: for each entry of the task's ansible_search_path, the
+// module's own subdirectory first and then the entry itself.
 //
-// Only a task that came from a role is touched, only a relative src, and
-// only when the role actually has that file — anything else is left
-// exactly as written, so a playbook-level task keeps resolving the way
-// it always did.
-func resolveRoleSrc(task Task, args map[string]any) {
-	sub, ok := roleSrcDirs[modules.NormalizeName(task.Module)]
-	if !ok || task.RoleDir == "" || args == nil {
+// This used to look in the role's directory and nowhere else, so
+// `copy: {src: hello.txt}` worked inside a role and failed outright at
+// play level -- "no such file or directory" for a file sitting right
+// next to the playbook. Measured against real: a play task finds
+// <playbook_dir>/files/hello.txt, and a role task still prefers its own
+// role's copy, because the role comes first in the search path.
+//
+// script is not like the others: its local path is the first word of
+// the command, not a src: argument. It was listed here all along and
+// never matched, because nothing ever set args["src"] for it.
+//
+// A source is left exactly as written when it is absolute, when nothing
+// in the search path has it, or when remote_src says it lives on the
+// TARGET -- measured: real does not resolve a remote_src source on the
+// controller, it fails with "Source <name> not found".
+func resolveLocalSrc(task Task, args map[string]any, dirs []string) {
+	sub, ok := localSrcDirs[modules.NormalizeName(task.Module)]
+	if !ok || args == nil || len(dirs) == 0 {
+		return
+	}
+	if isRemoteSrc(args["remote_src"]) {
+		return
+	}
+	if modules.NormalizeName(task.Module) == "script" {
+		resolveScriptPath(args, sub, dirs)
 		return
 	}
 	src, ok := args["src"].(string)
 	if !ok || src == "" || filepath.IsAbs(src) {
 		return
 	}
-	for _, candidate := range []string{
-		filepath.Join(task.RoleDir, sub, src),
-		filepath.Join(task.RoleDir, src),
-	} {
-		if _, err := os.Stat(candidate); err == nil {
-			args["src"] = candidate
+	if found, ok := findLocalSrc(src, sub, dirs); ok {
+		args["src"] = found
+	}
+}
+
+// resolveScriptPath rewrites the FIRST WORD of script's command, which
+// is the local script, and leaves the arguments after it alone.
+func resolveScriptPath(args map[string]any, sub string, dirs []string) {
+	for _, key := range []string{"cmd", "free_form", "_raw_params"} {
+		cmd, ok := args[key].(string)
+		if !ok || strings.TrimSpace(cmd) == "" {
+			continue
+		}
+		fields := strings.Fields(cmd)
+		if filepath.IsAbs(fields[0]) {
 			return
 		}
+		found, ok := findLocalSrc(fields[0], sub, dirs)
+		if !ok {
+			return
+		}
+		args[key] = strings.Join(append([]string{found}, fields[1:]...), " ")
+		return
 	}
+}
+
+// findLocalSrc walks the search path, trying the module's subdirectory
+// before the directory itself, and returns the first candidate that
+// exists.
+func findLocalSrc(src, sub string, dirs []string) (string, bool) {
+	for _, dir := range dirs {
+		for _, candidate := range []string{
+			filepath.Join(dir, sub, src),
+			filepath.Join(dir, src),
+		} {
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate, true
+			}
+		}
+	}
+	return "", false
+}
+
+// isRemoteSrc reads remote_src, which a playbook may write as a YAML
+// boolean or as one of the strings YAML 1.1 would have made one.
+func isRemoteSrc(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case "yes", "true", "on", "1":
+			return true
+		}
+	}
+	return false
 }
 
 // checkModeGate decides what a task does under --check. A module that
