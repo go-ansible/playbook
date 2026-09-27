@@ -213,14 +213,30 @@ func ConfigDefaults() []ConfigSetting {
 			Default:     "False",
 		},
 	}
-	// The effective value and where it came from. Only the environment
-	// is consulted here: an ini file is read by the caller, which knows
-	// which file it found.
+	// The effective value and where it came from, in real's precedence:
+	// the environment, then ansible.cfg, then the compiled-in default.
+	//
+	// Real spells an ini origin as the PATH ALONE -- measured,
+	// "DEFAULT_FORKS(/tmp/ansible.cfg) = 7" -- and an environment one as
+	// "env: ANSIBLE_X".
+	cfgPath := ConfigFilePath()
 	for i := range settings {
 		s := &settings[i]
 		s.Current, s.Source = s.Default, "default"
 		if raw, ok := os.LookupEnv(s.EnvVar); ok && raw != "" {
 			s.Current, s.Source = renderConfigValue(raw, s.Type), "env: "+s.EnvVar
+			continue
+		}
+		// Only if the environment said nothing: the environment WINS.
+		// Deciding the origin was the environment and then overwriting it
+		// with the file, as the printer used to, attributed a setting
+		// given in both places to the file while showing the
+		// environment's value -- a line that disagreed with itself.
+		if cfgPath == "" {
+			continue
+		}
+		if raw, ok := ConfigFileValueForEnv(s.EnvVar); ok {
+			s.Current, s.Source = renderConfigValue(raw, s.Type), cfgPath
 		}
 	}
 	// Real sorts its dump by name, so the order is part of the output.
