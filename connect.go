@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	remoteexec "github.com/go-remoteexec/transport"
@@ -118,42 +120,136 @@ func envInt(key string, def int) int {
 	return def
 }
 
-// ConfigSetting is one entry of ConfigDefaults' report: a named
-// setting, its ANSIBLE_* environment variable, its compiled-in
-// default, and its current effective value (env var if set and valid,
-// else the default) — the same precedence DefaultConnect itself uses,
-// minus the inventory/host-var layer (which needs a specific host to
-// resolve against, and so isn't part of this global view).
+// ConfigSetting is one entry of ConfigDefaults' report.
+//
+// Name is real Ansible's own canonical name for the setting --
+// DEFAULT_FORKS rather than forks -- because that is what
+// `ansible-config dump` prints and what a person greps its output for.
+// The ANSIBLE_* variable and the ini key are the two ways to set it.
+//
+// Default and Current are rendered the way real renders them, which is
+// PYTHON's repr and not Go's: True, False, None, a bare integer, a bare
+// string. Source says where Current came from, in real's own spelling:
+// "default", "env: ANSIBLE_X", or the path of the ini file.
+//
+// Description is this port's OWN wording. Real's descriptions are
+// GPL-licensed prose and these repositories are BSD-licensed, so
+// copying them across would import a licence rather than a fact -- the
+// names, variables, keys, types and defaults are interface facts and
+// are matched exactly; the prose is not and cannot be.
 type ConfigSetting struct {
-	Name    string
-	EnvVar  string
-	Default string
-	Current string
+	Name         string
+	EnvVar       string
+	IniSection   string
+	IniKey       string
+	Type         string
+	Description  string
+	VersionAdded string
+	Default      string
+	Current      string
+	Source       string
 }
 
 // ConfigDefaults reports every setting this package honors from the
 // environment and ansible.cfg's [defaults] section — go-ansible/cli's
-// ansible-config is a thin printer over this. This is the full list:
-// go-ansible reads no other ansible.cfg section or key, and no other
-// ANSIBLE_* variable, anywhere in the org.
+// ansible-config is a thin printer over this.
+//
+// It used to list four settings while the port honored seven: a person
+// could not discover ANSIBLE_FORCE_COLOR, ANSIBLE_NOCOLOR or
+// ANSIBLE_ALLOW_BROKEN_CONDITIONALS from `ansible-config` at all, though
+// all three change what a run does.
+//
+// Real lists 219. The ones missing here are missing because this port
+// does not honor them, and listing a setting that changes nothing would
+// be worse than its absence.
 func ConfigDefaults() []ConfigSetting {
-	return []ConfigSetting{
+	settings := []ConfigSetting{
 		{
-			Name: "remote_user", EnvVar: "ANSIBLE_REMOTE_USER",
-			Default: currentUser(), Current: envStr("ANSIBLE_REMOTE_USER", currentUser()),
+			// Real's default is None, not the current user: the config
+			// layer leaves it unset and the connection resolves it,
+			// which is what this port does too. Reporting the resolved
+			// user as the DEFAULT said the wrong thing about where the
+			// value comes from.
+			Name: "DEFAULT_REMOTE_USER", EnvVar: "ANSIBLE_REMOTE_USER",
+			IniSection: "defaults", IniKey: "remote_user", Type: "string",
+			Description:  "The user to log in as, when the play and the inventory name none.",
+			VersionAdded: "2.4",
+			Default:      "None",
 		},
 		{
-			Name: "host_key_checking", EnvVar: "ANSIBLE_HOST_KEY_CHECKING",
-			Default: "true", Current: strconv.FormatBool(envBool("ANSIBLE_HOST_KEY_CHECKING", true)),
+			Name: "HOST_KEY_CHECKING", EnvVar: "ANSIBLE_HOST_KEY_CHECKING",
+			IniSection: "defaults", IniKey: "host_key_checking", Type: "boolean",
+			Description: "Whether to refuse a host whose SSH key is not already known.",
+			Default:     "True",
 		},
 		{
-			Name: "timeout", EnvVar: "ANSIBLE_TIMEOUT",
-			Default: "10", Current: strconv.Itoa(envInt("ANSIBLE_TIMEOUT", 10)),
+			Name: "DEFAULT_TIMEOUT", EnvVar: "ANSIBLE_TIMEOUT",
+			IniSection: "defaults", IniKey: "timeout", Type: "integer",
+			Description: "How long a connection may take to establish, in seconds.",
+			Default:     "10",
 		},
 		{
-			Name: "forks", EnvVar: "ANSIBLE_FORKS",
-			Default: "5", Current: strconv.Itoa(envInt("ANSIBLE_FORKS", 5)),
+			Name: "DEFAULT_FORKS", EnvVar: "ANSIBLE_FORKS",
+			IniSection: "defaults", IniKey: "forks", Type: "integer",
+			Description: "How many hosts to work on at once.",
+			Default:     "5",
 		},
+		{
+			Name: "ANSIBLE_FORCE_COLOR", EnvVar: "ANSIBLE_FORCE_COLOR",
+			IniSection: "defaults", IniKey: "force_color", Type: "boolean",
+			Description: "Colorize output even when it is not going to a terminal.",
+			Default:     "False",
+		},
+		{
+			Name: "ANSIBLE_NOCOLOR", EnvVar: "ANSIBLE_NOCOLOR",
+			IniSection: "defaults", IniKey: "nocolor", Type: "boolean",
+			Description: "Never colorize output, whatever it is going to.",
+			Default:     "False",
+		},
+		{
+			Name: "ALLOW_BROKEN_CONDITIONALS", EnvVar: "ANSIBLE_ALLOW_BROKEN_CONDITIONALS",
+			IniSection: "defaults", IniKey: "allow_broken_conditionals", Type: "boolean",
+			Description: "Accept a conditional that does not evaluate to a boolean.",
+			Default:     "False",
+		},
+	}
+	// The effective value and where it came from. Only the environment
+	// is consulted here: an ini file is read by the caller, which knows
+	// which file it found.
+	for i := range settings {
+		s := &settings[i]
+		s.Current, s.Source = s.Default, "default"
+		if raw, ok := os.LookupEnv(s.EnvVar); ok && raw != "" {
+			s.Current, s.Source = renderConfigValue(raw, s.Type), "env: "+s.EnvVar
+		}
+	}
+	// Real sorts its dump by name, so the order is part of the output.
+	sort.Slice(settings, func(i, j int) bool { return settings[i].Name < settings[j].Name })
+	return settings
+}
+
+// renderConfigValue spells a value the way real does: a boolean as True
+// or False whatever the input looked like, an integer bare, a string
+// bare, and an empty string as None.
+func renderConfigValue(raw, typ string) string {
+	switch typ {
+	case "boolean":
+		switch strings.ToLower(strings.TrimSpace(raw)) {
+		case "1", "true", "yes", "on", "y", "t":
+			return "True"
+		default:
+			return "False"
+		}
+	case "integer":
+		if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil {
+			return strconv.Itoa(n)
+		}
+		return raw
+	default:
+		if raw == "" {
+			return "None"
+		}
+		return raw
 	}
 }
 
