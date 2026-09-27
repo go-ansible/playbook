@@ -3,6 +3,8 @@ package playbook
 import (
 	"context"
 	"os"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -58,26 +60,55 @@ func TestConfigDefaultsReflectsEnvOverride(t *testing.T) {
 	t.Setenv("ANSIBLE_HOST_KEY_CHECKING", "false")
 	t.Setenv("ANSIBLE_TIMEOUT", "45")
 
-	settings := ConfigDefaults()
-	if len(settings) != 4 {
-		t.Fatalf("ConfigDefaults() = %d entries, want 4", len(settings))
-	}
 	byName := map[string]ConfigSetting{}
-	for _, s := range settings {
+	for _, s := range ConfigDefaults() {
 		byName[s.Name] = s
 	}
-	if byName["remote_user"].Current != "deployer" {
-		t.Fatalf("remote_user.Current = %q", byName["remote_user"].Current)
+	// Real's canonical names, which is what ansible-config prints and
+	// what a person greps for.
+	for name, want := range map[string]string{
+		"DEFAULT_REMOTE_USER": "deployer",
+		// A boolean is spelled the way Python spells it, whatever the
+		// variable said.
+		"HOST_KEY_CHECKING": "False",
+		"DEFAULT_TIMEOUT":   "45",
+	} {
+		if got := byName[name].Current; got != want {
+			t.Errorf("%s.Current = %q, want %q", name, got, want)
+		}
+		if byName[name].Source != "env: "+byName[name].EnvVar {
+			t.Errorf("%s.Source = %q", name, byName[name].Source)
+		}
 	}
-	if byName["host_key_checking"].Current != "false" {
-		t.Fatalf("host_key_checking.Current = %q", byName["host_key_checking"].Current)
+	// A TRUE-ish value too, and in a spelling Python does not use:
+	// without this the True branch is never reached, and a neuter that
+	// spelled it Go's way passed.
+	t.Setenv("ANSIBLE_FORCE_COLOR", "yes")
+	for _, s := range ConfigDefaults() {
+		if s.Name == "ANSIBLE_FORCE_COLOR" && s.Current != "True" {
+			t.Errorf("ANSIBLE_FORCE_COLOR=yes reported %q, want True", s.Current)
+		}
 	}
-	if byName["timeout"].Current != "45" {
-		t.Fatalf("timeout.Current = %q", byName["timeout"].Current)
+
+	// EnvVar/Default are static regardless of the environment.
+	if e := byName["DEFAULT_TIMEOUT"]; e.EnvVar != "ANSIBLE_TIMEOUT" || e.Default != "10" {
+		t.Errorf("DEFAULT_TIMEOUT entry = %+v", e)
 	}
-	// EnvVar/Default fields are static regardless of the environment.
-	if byName["timeout"].EnvVar != "ANSIBLE_TIMEOUT" || byName["timeout"].Default != "10" {
-		t.Fatalf("timeout entry = %+v", byName["timeout"])
+	// Every setting this port honors is listed. It reported four while
+	// honoring seven, so three were unreachable through ansible-config.
+	for _, name := range []string{
+		"ALLOW_BROKEN_CONDITIONALS", "ANSIBLE_FORCE_COLOR", "ANSIBLE_NOCOLOR",
+		"DEFAULT_FORKS", "DEFAULT_REMOTE_USER", "DEFAULT_TIMEOUT", "HOST_KEY_CHECKING",
+	} {
+		if _, listed := byName[name]; !listed {
+			t.Errorf("%s is honored but not listed", name)
+		}
+	}
+	// And each carries what `ansible-config list` needs to print.
+	for _, s := range ConfigDefaults() {
+		if s.EnvVar == "" || s.IniKey == "" || s.IniSection == "" || s.Type == "" || s.Description == "" {
+			t.Errorf("%s is missing listing metadata: %+v", s.Name, s)
+		}
 	}
 }
 
@@ -182,5 +213,70 @@ func TestConfigFileValueForEnvMissingKey(t *testing.T) {
 	}
 	if _, ok := ConfigFileValueForEnv("ANSIBLE_REMOTE_USER"); ok {
 		t.Fatal("ConfigFileValueForEnv: want not-ok for a key the file doesn't set")
+	}
+}
+
+// The dump lines real prints for the settings this port honors,
+// measured from ansible-core 2.21.4 with nothing set:
+//
+//	ALLOW_BROKEN_CONDITIONALS(default) = False
+//	ANSIBLE_FORCE_COLOR(default) = False
+//	ANSIBLE_NOCOLOR(default) = False
+//	DEFAULT_FORKS(default) = 5
+//	DEFAULT_REMOTE_USER(default) = None
+//	DEFAULT_TIMEOUT(default) = 10
+//	HOST_KEY_CHECKING(default) = True
+//
+// The names are real's canonical ones, the values are Python's spelling,
+// and the order is real's (sorted by name).
+func TestConfigDefaultsMatchRealsDumpLines(t *testing.T) {
+	for _, v := range []string{
+		"ANSIBLE_REMOTE_USER", "ANSIBLE_HOST_KEY_CHECKING", "ANSIBLE_TIMEOUT",
+		"ANSIBLE_FORKS", "ANSIBLE_FORCE_COLOR", "ANSIBLE_NOCOLOR",
+		"ANSIBLE_ALLOW_BROKEN_CONDITIONALS",
+	} {
+		t.Setenv(v, "")
+		os.Unsetenv(v)
+	}
+	want := []string{
+		"ALLOW_BROKEN_CONDITIONALS(default) = False",
+		"ANSIBLE_FORCE_COLOR(default) = False",
+		"ANSIBLE_NOCOLOR(default) = False",
+		"DEFAULT_FORKS(default) = 5",
+		"DEFAULT_REMOTE_USER(default) = None",
+		"DEFAULT_TIMEOUT(default) = 10",
+		"HOST_KEY_CHECKING(default) = True",
+	}
+	var got []string
+	for _, s := range ConfigDefaults() {
+		got = append(got, s.Name+"("+s.Source+") = "+s.Current)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("dump lines differ from real's\n got %#v\nwant %#v", got, want)
+	}
+}
+
+// Measured: a value from the environment is reported as
+// "NAME(env: ANSIBLE_X) = value", and a boolean is spelled True or False
+// whatever the variable said.
+func TestConfigDefaultsReportTheEnvironmentAsRealDoes(t *testing.T) {
+	t.Setenv("ANSIBLE_FORKS", "9")
+	t.Setenv("ANSIBLE_REMOTE_USER", "bob")
+	t.Setenv("ANSIBLE_HOST_KEY_CHECKING", "no")
+	byName := map[string]ConfigSetting{}
+	for _, s := range ConfigDefaults() {
+		byName[s.Name] = s
+	}
+	for name, want := range map[string]string{
+		"DEFAULT_FORKS(env: ANSIBLE_FORKS) = 9":                     "",
+		"DEFAULT_REMOTE_USER(env: ANSIBLE_REMOTE_USER) = bob":       "",
+		"HOST_KEY_CHECKING(env: ANSIBLE_HOST_KEY_CHECKING) = False": "",
+	} {
+		_ = want
+		key := name[:strings.Index(name, "(")]
+		s := byName[key]
+		if line := s.Name + "(" + s.Source + ") = " + s.Current; line != name {
+			t.Errorf("got %q, want %q", line, name)
+		}
 	}
 }
