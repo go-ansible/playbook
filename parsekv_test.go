@@ -3,6 +3,8 @@ package playbook
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -304,5 +306,85 @@ func TestLookupFailureReachesTheUserAsRealWordsIt(t *testing.T) {
 		"Use -vvvvv to see paths searched."
 	if got[0].Msg != want {
 		t.Errorf("msg  = %q\nwant = %q", got[0].Msg, want)
+	}
+}
+
+// A relative local source resolves through the task's search path, with
+// the module's own subdirectory tried before the directory itself.
+// Measured from real with the same filename in every layer at once:
+// copy and script take files/, template takes templates/, the role
+// comes before the playbook, and remote_src is not resolved here at all.
+func TestResolveLocalSrc(t *testing.T) {
+	root := t.TempDir()
+	role := filepath.Join(root, "roles", "r1")
+	pb := filepath.Join(root, "pb")
+	for _, d := range []string{
+		filepath.Join(role, "files"), filepath.Join(role, "templates"),
+		filepath.Join(pb, "files"), filepath.Join(pb, "templates"),
+	} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	touch := func(parts ...string) string {
+		p := filepath.Join(parts...)
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	roleFiles := touch(role, "files", "s.txt")
+	pbFiles := touch(pb, "files", "s.txt")
+	pbTemplates := touch(pb, "templates", "s.j2")
+	pbBare := touch(pb, "bare.txt")
+	// The SAME name in both layers of one directory: the only shape
+	// that tells "subdirectory first" apart from "directory first".
+	// Without it the two orders are the same function, and a neuter
+	// swapping them passed.
+	bothSub := touch(pb, "files", "both.txt")
+	touch(pb, "both.txt")
+
+	playDirs := []string{pb}
+	roleDirs := []string{role, filepath.Join(role, "tasks"), pb}
+
+	for _, tc := range []struct {
+		name string
+		task Task
+		args map[string]any
+		dirs []string
+		key  string
+		want any
+	}{
+		{"play copy finds files/", Task{Module: "copy"},
+			map[string]any{"src": "s.txt"}, playDirs, "src", pbFiles},
+		{"role copy prefers its own", Task{Module: "copy", RoleDir: role},
+			map[string]any{"src": "s.txt"}, roleDirs, "src", roleFiles},
+		{"template takes templates/", Task{Module: "template"},
+			map[string]any{"src": "s.j2"}, playDirs, "src", pbTemplates},
+		{"bare directory is searched too", Task{Module: "copy"},
+			map[string]any{"src": "bare.txt"}, playDirs, "src", pbBare},
+		{"the subdirectory wins over the directory", Task{Module: "copy"},
+			map[string]any{"src": "both.txt"}, playDirs, "src", bothSub},
+		{"script resolves its first word", Task{Module: "script"},
+			map[string]any{"_raw_params": "s.txt one two"}, playDirs,
+			"_raw_params", pbFiles + " one two"},
+		// Left alone, each for its own reason.
+		{"absolute src untouched", Task{Module: "copy"},
+			map[string]any{"src": "/etc/hosts"}, playDirs, "src", "/etc/hosts"},
+		{"missing src untouched", Task{Module: "copy"},
+			map[string]any{"src": "nowhere.txt"}, playDirs, "src", "nowhere.txt"},
+		{"remote_src untouched", Task{Module: "copy"},
+			map[string]any{"src": "s.txt", "remote_src": true}, playDirs, "src", "s.txt"},
+		{"remote_src as a string untouched", Task{Module: "copy"},
+			map[string]any{"src": "s.txt", "remote_src": "yes"}, playDirs, "src", "s.txt"},
+		{"a module with no local source", Task{Module: "file"},
+			map[string]any{"src": "s.txt"}, playDirs, "src", "s.txt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolveLocalSrc(tc.task, tc.args, tc.dirs)
+			if tc.args[tc.key] != tc.want {
+				t.Errorf("%s = %v, want %v", tc.key, tc.args[tc.key], tc.want)
+			}
+		})
 	}
 }
