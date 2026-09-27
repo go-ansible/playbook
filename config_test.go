@@ -3,6 +3,7 @@ package playbook
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -278,5 +279,35 @@ func TestConfigDefaultsReportTheEnvironmentAsRealDoes(t *testing.T) {
 		if line := s.Name + "(" + s.Source + ") = " + s.Current; line != name {
 			t.Errorf("got %q, want %q", line, name)
 		}
+	}
+}
+
+// The ansible.cfg layer, in real's precedence and real's spelling.
+// Measured: an ini origin is the PATH ALONE -- DEFAULT_FORKS(/tmp/x.cfg)
+// = 7 -- and the environment WINS over the file.
+func TestConfigDefaultsFoldInTheConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "ansible.cfg")
+	if err := os.WriteFile(cfg, []byte("[defaults]\nforks = 7\ntimeout = 33\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANSIBLE_CONFIG", cfg)
+	// Given in BOTH places: the environment must win, and the line must
+	// not claim the file while showing the environment's value.
+	t.Setenv("ANSIBLE_TIMEOUT", "99")
+
+	byName := map[string]ConfigSetting{}
+	for _, s := range ConfigDefaults() {
+		byName[s.Name] = s
+	}
+	if got := byName["DEFAULT_FORKS"]; got.Current != "7" || got.Source != cfg {
+		t.Errorf("DEFAULT_FORKS = %q(%q), want 7(%s)", got.Current, got.Source, cfg)
+	}
+	if got := byName["DEFAULT_TIMEOUT"]; got.Current != "99" || got.Source != "env: ANSIBLE_TIMEOUT" {
+		t.Errorf("DEFAULT_TIMEOUT = %q(%q), want 99(env: ANSIBLE_TIMEOUT)", got.Current, got.Source)
+	}
+	// A key the file does not set stays at its default.
+	if got := byName["HOST_KEY_CHECKING"]; got.Source != "default" {
+		t.Errorf("HOST_KEY_CHECKING source = %q, want default", got.Source)
 	}
 }
