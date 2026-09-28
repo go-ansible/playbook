@@ -1252,12 +1252,23 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 		// have all finished — the work stays concurrent, the
 		// TRANSCRIPT stops depending on which goroutine won.
 		ec.bufferHosts(runOn)
+		// throttle: caps how many hosts run THIS task at once, on top
+		// of the run's own fork limit. A task-local limiter, because
+		// the cap is the task's and must not outlive it. Real accepts
+		// the keyword and runs the task; this port used to REFUSE the
+		// whole playbook for it.
+		thr := newForkLimiter(task.Throttle)
 		for _, h := range runOn {
 			wg.Add(1)
 			go func(h string) {
 				defer wg.Done()
+				// Always fork permit first, then throttle: one order
+				// for every goroutine, so two counting semaphores
+				// cannot deadlock against each other.
 				release := ec.acquire()
 				defer release()
+				releaseThrottle := thr.acquire()
+				defer releaseThrottle()
 				st := ec.states[h]
 				failed := ec.runTaskOnHost(ctx, task, st, pr, isHandler)
 				mu.Lock()
@@ -1814,11 +1825,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				} else if task.Async > 0 {
 					result = ec.runAsyncTask(ctx, task, conn, args)
 				} else {
-					var rerr error
-					result, rerr = ec.engine.Modules.Run(ctx, task.Module, conn, args)
-					if rerr != nil {
-						result = modules.Fail(rerr.Error())
-					}
+					result = ec.runWithTimeout(ctx, task, conn, args)
 				}
 			}
 
@@ -3384,6 +3391,82 @@ func conditionalFailure(keyword string, err error) string {
 		return fmt.Sprintf("Task failed: A 'when' expression failed: Error while evaluating conditional: %v", innermost(err))
 	}
 	return fmt.Sprintf("Task failed: Action failed: A '%s' expression failed: Error while evaluating conditional: %v", keyword, innermost(err))
+}
+
+// timeoutFrame is what real puts in timedout.frame when it has no
+// traceback to show, which is the default. Reproduced verbatim because
+// a playbook reading result.timedout reads this.
+const timeoutFrame = "Configure `DISPLAY_TRACEBACK` to see a traceback on timeout errors."
+
+// runWithTimeout runs the module under the task's timeout: keyword.
+//
+// Measured against ansible-core 2.21.4. A task that times out reports
+//
+//	changed  false
+//	msg      Task failed: Timed out after 1 second(s).
+//	timedout {"frame": "Configure `DISPLAY_TRACEBACK` ...", "period": 1}
+//
+// and NOTHING of the module's own: no rc, no cmd, no stdout. Whatever
+// it was doing is discarded rather than reported half-done, which is
+// the point of the keyword. "second(s)" is real's own spelling, plural
+// and singular alike.
+//
+// timeout: 0 -- and an absent timeout: -- mean no limit at all;
+// measured, a two-second sleep under timeout: 0 completes.
+func (ec *execCtx) runWithTimeout(ctx context.Context, task Task, conn remoteexec.Connection, args map[string]any) modules.Result {
+	run := func(ctx context.Context) modules.Result {
+		res, err := ec.engine.Modules.Run(ctx, task.Module, conn, args)
+		if err != nil {
+			return modules.Fail(err.Error())
+		}
+		return res
+	}
+	if task.Timeout <= 0 {
+		return run(ctx)
+	}
+
+	tctx, cancel := context.WithTimeout(ctx, time.Duration(task.Timeout)*time.Second)
+	defer cancel()
+
+	done := make(chan modules.Result, 1)
+	go func() { done <- run(tctx) }()
+	select {
+	case res := <-done:
+		// The module may itself have returned BECAUSE the context
+		// expired -- a command killed mid-flight, reporting its own
+		// death rather than the timeout. Real reports the timeout.
+		//
+		// This branch guards a race the tests cannot force: it needs
+		// the module to return in the same instant the deadline
+		// passes, and the select above normally wins. A neuter
+		// removing it PASSES, and that is said here rather than left
+		// to look covered.
+		if tctx.Err() != nil && errors.Is(tctx.Err(), context.DeadlineExceeded) {
+			return timedOutResult(task.Timeout)
+		}
+		return res
+	case <-tctx.Done():
+		if errors.Is(tctx.Err(), context.DeadlineExceeded) {
+			return timedOutResult(task.Timeout)
+		}
+		// The RUN was cancelled, not the task: wait for the module so
+		// its goroutine does not outlive the play.
+		return <-done
+	}
+}
+
+func timedOutResult(period int) modules.Result {
+	// modules.Fail already leaves Changed at its zero value, so there
+	// is nothing to clear here -- a neuter removing an explicit
+	// `r.Changed = false` passed, and the line is gone rather than
+	// left looking load-bearing. The ASSERTION that real reports
+	// changed=false stays, because it is real's behaviour and would
+	// catch a future result built some other way.
+	r := modules.Fail(fmt.Sprintf("Task failed: Timed out after %d second(s).", period))
+	return r.WithExtra("timedout", map[string]any{
+		"frame":  timeoutFrame,
+		"period": period,
+	})
 }
 
 // conditionalEvaluatedTo words the failure of a task that its own
