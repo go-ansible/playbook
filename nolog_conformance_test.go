@@ -65,10 +65,14 @@ func TestWithoutNoLogTheMessageIsPrinted(t *testing.T) {
 // one of these used to fail with "ambiguous module", which reads like
 // the playbook is malformed when it is this port that is incomplete.
 func TestUnhonouredTaskKeywordsAreNamed(t *testing.T) {
+	// timeout: and throttle: left this list when they became
+	// HONOURED -- see TestTaskTimeout and TestThrottleLimitsOneTask.
+	// The rest stay refused on purpose: silently accepting
+	// `connection: local` would mean running something other than what
+	// the playbook says, which is worse than saying no.
 	for _, kw := range []string{
-		"connection: local", "remote_user: x", "port: 22", "throttle: 2",
+		"connection: local", "remote_user: x", "port: 22",
 		"collections: [a.b]",
-		"timeout: 30",
 		"delegate_facts: true",
 		"debugger: never", "become_flags: -H", "become_exe: sudo",
 	} {
@@ -159,5 +163,26 @@ func TestNoEnvironmentMeansNoPrefix(t *testing.T) {
 `)
 	if !strings.Contains(out, "V=[unset]") {
 		t.Errorf("expected an unset variable:\n%s", out)
+	}
+}
+
+// TestHonouredKeywordsParseAsKeywords is the other side of
+// TestUnhonouredTaskKeywordsAreNamed: these two are now acted on, so
+// they must parse as keywords rather than be refused OR be mistaken
+// for a module name.
+func TestHonouredKeywordsParseAsKeywords(t *testing.T) {
+	pb, err := Parse([]byte("- {name: p, hosts: all, gather_facts: false, tasks: [{name: t, debug: {msg: x}, timeout: 30, throttle: 2}]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := pb[0].Tasks[0]
+	if task.Module != "debug" {
+		t.Errorf("Module = %q, want debug", task.Module)
+	}
+	if task.Timeout != 30 {
+		t.Errorf("Timeout = %d, want 30", task.Timeout)
+	}
+	if task.Throttle != 2 {
+		t.Errorf("Throttle = %d, want 2", task.Throttle)
 	}
 }

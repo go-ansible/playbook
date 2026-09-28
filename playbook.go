@@ -186,6 +186,18 @@ type Task struct {
 	// only an explicit false drops the key.
 	LoopExtendedAllItems *bool
 
+	// Throttle is the task-level throttle: keyword -- the most hosts
+	// that may run THIS task at once, however many forks the run has.
+	// Zero (and absent) mean no cap of its own.
+	Throttle int
+
+	// Timeout is the task-level timeout: keyword, in seconds. Real
+	// gives up on the task's action after that long, discards whatever
+	// it was doing and fails. Zero (and absent) mean no timeout, which
+	// is real's own default -- measured, `timeout: 0` lets a two-second
+	// sleep finish.
+	Timeout int
+
 	// LoopBreakWhen is loop_control.break_when, already normalized to
 	// one expression. It is evaluated AFTER each iteration, and when
 	// it holds the loop ends -- the iteration that triggered it has
@@ -771,7 +783,7 @@ var taskReservedKeys = map[string]bool{
 	// name — which is what a key this parser does not know becomes.
 	"no_log": true, "environment": true, "any_errors_fatal": true,
 	"module_defaults": true, "ignore_unreachable": true, "diff": true,
-	"check_mode": true,
+	"check_mode": true, "timeout": true, "throttle": true,
 }
 
 // optionalBool reads a keyword that has three states: absent, true and
@@ -809,8 +821,6 @@ var unhonouredTaskKeys = map[string]string{
 	"loop_with":      "use loop: or with_items:",
 	"port":           "set it on the PLAY, which this port honours, or ansible_port on the host",
 	"remote_user":    "set it on the PLAY, which this port honours, or ansible_user on the host",
-	"throttle":       "use serial: on the play, which this port honours",
-	"timeout":        "",
 }
 
 // includeReservedKeys are the extra keys recognized on an
@@ -969,6 +979,12 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 	if v, ok := m["poll"]; ok {
 		n := toInt(v)
 		t.Poll = &n
+	}
+	if v, ok := m["timeout"]; ok {
+		t.Timeout = toInt(v)
+	}
+	if v, ok := m["throttle"]; ok {
+		t.Throttle = toInt(v)
 	}
 	if lc, ok := m["loop_control"].(map[string]any); ok {
 		if lv := str(lc["loop_var"]); lv != "" {
