@@ -2121,7 +2121,14 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		}
 		regValue["changed"] = anyChanged
 		regValue["failed"] = anyFailed
-		if lastResult.Msg != "" {
+		// NoMsg is honoured HERE too, not only in resultToMap. A
+		// module that says it has no msg KEY can still carry a Msg
+		// field this port uses for the printed line -- wait_for's is
+		// the path it waited for -- and re-adding it here put a msg
+		// back into the registered result that real does not have.
+		// Measured: real's wait_for registers fifteen keys and msg is
+		// not among them.
+		if !lastResult.NoMsg && lastResult.Msg != "" {
 			regValue["msg"] = lastResult.Msg
 		}
 		// setup/gather_facts and set_fact/include_vars put their
