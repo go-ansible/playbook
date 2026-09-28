@@ -175,12 +175,19 @@ type Task struct {
 	LoopLabel    string
 	Register     string
 	IgnoreErrors bool
-	ChangedWhen  string
-	FailedWhen   string
-	Tags         []string
-	Become       *bool // nil means "inherit the play's setting"
-	BecomeUser   string
-	Notify       []string
+
+	// Diff is the task-level `diff:` keyword. It is a POINTER because
+	// it overrides --diff in BOTH directions -- measured: `diff: true`
+	// turns diff on for that task without the flag, and `diff: false`
+	// turns it off despite the flag -- so "unset" has to be a third
+	// state rather than false.
+	Diff        *bool
+	ChangedWhen string
+	FailedWhen  string
+	Tags        []string
+	Become      *bool // nil means "inherit the play's setting"
+	BecomeUser  string
+	Notify      []string
 
 	// Listen are the notify TOPICS this handler answers to, on top of
 	// its own name. Only meaningful on a handler.
@@ -738,8 +745,19 @@ var taskReservedKeys = map[string]bool{
 	// Honoured, and added here so they are not mistaken for a module
 	// name — which is what a key this parser does not know becomes.
 	"no_log": true, "environment": true, "any_errors_fatal": true,
-	"module_defaults": true, "ignore_unreachable": true,
+	"module_defaults": true, "ignore_unreachable": true, "diff": true,
 	"check_mode": true,
+}
+
+// optionalBool reads a keyword that has three states: absent, true and
+// false. boolDefault cannot express the difference, and for `diff:` the
+// difference is the whole point.
+func optionalBool(v any) *bool {
+	if v == nil {
+		return nil
+	}
+	b := boolDefault(v, false)
+	return &b
 }
 
 // unhonouredTaskKeys are real Ansible task keywords this port PARSES but
@@ -763,7 +781,6 @@ var unhonouredTaskKeys = map[string]string{
 	"connection":     "set it on the PLAY, which this port honours, or ansible_connection on the host",
 	"debugger":       "",
 	"delegate_facts": "",
-	"diff":           "use the --diff flag, which this port honours",
 	"loop_with":      "use loop: or with_items:",
 	"port":           "set it on the PLAY, which this port honours, or ansible_port on the host",
 	"remote_user":    "set it on the PLAY, which this port honours, or ansible_user on the host",
@@ -894,6 +911,7 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 		LoopVar:           "item",
 		Register:          str(m["register"]),
 		IgnoreErrors:      boolDefault(m["ignore_errors"], false),
+		Diff:              optionalBool(m["diff"]),
 		ChangedWhen:       str(m["changed_when"]),
 		FailedWhen:        str(m["failed_when"]),
 		Tags:              toStringList(m["tags"]),

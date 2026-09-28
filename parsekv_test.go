@@ -388,3 +388,56 @@ func TestResolveLocalSrc(t *testing.T) {
 		})
 	}
 }
+
+// The task-level `diff:` keyword overrides --diff in BOTH directions --
+// measured against real: `diff: true` prints a diff with no flag, and
+// `diff: false` prints none despite the flag. So "unset" has to be a
+// third state, which is why Task.Diff is a pointer.
+func TestTaskDiffKeywordOverridesTheFlagBothWays(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: on
+      debug: msg=x
+      diff: true
+    - name: off
+      debug: msg=x
+      diff: false
+    - name: unset
+      debug: msg=x
+`))
+	if err != nil {
+		t.Fatalf("the diff keyword was refused: %v", err)
+	}
+	tasks := pb[0].Tasks
+	if tasks[0].Diff == nil || !*tasks[0].Diff {
+		t.Errorf("diff: true parsed as %v", tasks[0].Diff)
+	}
+	if tasks[1].Diff == nil || *tasks[1].Diff {
+		t.Errorf("diff: false parsed as %v", tasks[1].Diff)
+	}
+	if tasks[2].Diff != nil {
+		t.Errorf("an absent diff: parsed as %v, want nil", tasks[2].Diff)
+	}
+
+	// And the resolution against the engine's own flag.
+	for _, tc := range []struct {
+		name   string
+		engine bool
+		task   *bool
+		want   bool
+	}{
+		{"unset follows the flag off", false, nil, false},
+		{"unset follows the flag on", true, nil, true},
+		{"true beats the flag off", false, tasks[0].Diff, true},
+		{"false beats the flag on", true, tasks[1].Diff, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ec := &execCtx{engine: &Engine{DiffMode: tc.engine}}
+			if got := ec.diffFor(Task{Diff: tc.task}); got != tc.want {
+				t.Errorf("diffFor = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
