@@ -3,6 +3,7 @@ package playbook
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/go-ansible/inventory"
@@ -340,5 +341,55 @@ func TestMaxFailPercentageBoundary(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestFreeStrategyDoesNotShrinkPlayHosts pins the other side of
+// refreshPlayHosts' linear-only gate. It is also the regression guard
+// for a data race: refreshing from every host's goroutine wrote every
+// host's vars.Context at once, and CI caught "fatal error: concurrent
+// map writes" on riscv64.
+//
+// Measured with h1 failing under `strategy: free`: at -f 5 every other
+// host still reports hosts=5, while at -f 1 it reports 4 -- one fork
+// makes a free play linear, which is why this port routes that case
+// through the linear path.
+func TestFreeStrategyDoesNotShrinkPlayHosts(t *testing.T) {
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  strategy: free
+  tasks:
+    - name: h1 fails
+      command: "false"
+      when: "inventory_hostname == 'h1'"
+    - name: after
+      debug: msg="hosts={{ ansible_play_hosts | length }} all={{ ansible_play_hosts_all | length }}"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msgs []string
+	var mu sync.Mutex
+	e := New(fiveHosts(t))
+	e.Forks = 5 // genuinely concurrent, which is what free means
+	e.OnResult = func(r Result) {
+		if r.Task != "after" {
+			return
+		}
+		mu.Lock()
+		msgs = append(msgs, r.Msg)
+		mu.Unlock()
+	}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 4 {
+		t.Fatalf("got %d results %v, want 4", len(msgs), msgs)
+	}
+	for _, m := range msgs {
+		if m != "hosts=5 all=5" {
+			t.Errorf("got %q, real gives %q under free -- ansible_play_hosts does not shrink there", m, "hosts=5 all=5")
+		}
 	}
 }

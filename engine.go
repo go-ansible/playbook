@@ -245,6 +245,16 @@ type hostState struct {
 	// followed by another that tries again.
 	connErr error
 
+	// failedMu guards failed. Under the FREE strategy one goroutine
+	// per host runs the whole task list, and applySafetyLimits reads
+	// EVERY host's flag from whichever goroutine reached it -- while
+	// that host's own goroutine may be writing it. A pre-existing
+	// data race, shipped, and in the safety brake itself: a stale
+	// false there means a rollout that should have stopped does not.
+	// Found by a -race run of the free path, which nothing exercised
+	// before.
+	failedMu sync.Mutex
+
 	// currentTask is what this host is running right now, and
 	// lastFailedTask/lastFailedResult are the most recent failure —
 	// what a rescue: block reads back as ansible_failed_task and
@@ -260,7 +270,7 @@ type hostState struct {
 	lastFailedTask   Task
 	lastFailedResult map[string]any
 
-	failed bool
+	failed bool // guarded by failedMu; use isFailed/setFailed
 	// notify holds the INDICES of the play's handlers this host has
 	// notified, not their names: a notification can reach several
 	// handlers at once through listen:, and two handlers may share a
@@ -512,7 +522,7 @@ func (e *Engine) dropFailedHosts(hosts []*inventory.Host) []*inventory.Host {
 // so later plays skip them.
 func (e *Engine) noteFailedHosts(ec *execCtx) {
 	for name, st := range ec.states {
-		if !st.failed {
+		if !st.isFailed() {
 			continue
 		}
 		if e.failedHosts == nil {
@@ -652,11 +662,16 @@ func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Hos
 		// batch and had no third, so under serial: a template asking
 		// "who else is in this play" saw only its own batch.
 		vc.SetVar(vars.Inventory, "ansible_play_batch", playHosts)
-		// ansible_play_hosts is NOT set here: refreshPlayHosts owns
-		// it, and runs before every task. Setting it here as well
-		// looked right and was dead -- a neuter putting the BATCH back
-		// in this line passed, because the first refresh overwrote it
-		// before anything could read it. One writer.
+		// Two writers, for two paths, and that is not an accident.
+		// This is the value the FREE strategy uses, where
+		// refreshPlayHosts does not run at all; on the linear path the
+		// first refresh replaces it before any task reads it.
+		//
+		// Removing this line looked right -- a neuter putting the
+		// BATCH back in it passed, since linear overwrites it -- and
+		// broke free, where ansible_play_hosts became undefined. "Dead
+		// on the path I was looking at" is not dead.
+		vc.SetVar(vars.Inventory, "ansible_play_hosts", ec.playHostsAll)
 		vc.SetVar(vars.Inventory, "ansible_play_hosts_all", ec.playHostsAll)
 		vc.SetVar(vars.Inventory, "inventory_dir", e.Inventory.SourceDir)
 		vc.SetVar(vars.Inventory, "playbook_dir", playbookDir)
@@ -804,7 +819,7 @@ func (ec *execCtx) reportUnreachable(pr *PlayResult, st *hostState, task Task, e
 	if ignored {
 		return false
 	}
-	st.failed = true
+	st.setFailed(true)
 	return true
 }
 
@@ -838,7 +853,7 @@ func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *Pla
 			gathered, err := facts.Gather(ctx, conn)
 			if err != nil {
 				mu.Lock()
-				st.failed = true
+				st.setFailed(true)
 				ec.report(pr, Result{Host: st.name, Task: gatheringFactsTask, Failed: true, Msg: err.Error()})
 				mu.Unlock()
 				return
@@ -865,7 +880,26 @@ func (ec *execCtx) runTaskList(ctx context.Context, tasks []Task, active []strin
 		// failure both read [h1..h5], and the task after it reads
 		// hosts=[h2..h5] all=[h1..h5]. Refreshed here rather than set
 		// once per play, because "once" cannot shrink.
-		ec.refreshPlayHosts()
+		//
+		// LINEAR ONLY, and that is real's behaviour rather than a
+		// concession. Measured with h1 failing under `strategy: free`:
+		//
+		//	-f 5  every other host still reports hosts=5
+		//	-f 1  every other host reports hosts=4
+		//
+		// The second is not a contradiction: with ONE fork a free play
+		// runs linearly, which is exactly why this port routes that
+		// case through the linear path already. Both sides agree on
+		// both.
+		//
+		// It is also what the concurrency contract requires -- free
+		// runs one goroutine per host and each touches only ITS OWN
+		// vars.Context, so writing every host's from every goroutine is
+		// a data race. It WAS one: CI caught "fatal error: concurrent
+		// map writes" on riscv64, in this exact call.
+		if !ec.free {
+			ec.refreshPlayHosts()
+		}
 		if task.IsBlock() {
 			active = ec.runBlock(ctx, task, active, pr)
 		} else {
@@ -881,10 +915,14 @@ func (ec *execCtx) runTaskList(ctx context.Context, tasks []Task, active []strin
 // refreshPlayHosts re-publishes ansible_play_hosts as the play's hosts
 // that have NOT failed. ansible_play_hosts_all is left alone: it is the
 // play's roster at its start, and real never shrinks it.
+//
+// Called from the LINEAR path only -- see its call site. It writes
+// every host's vars.Context, which is safe only where one goroutine
+// owns them all.
 func (ec *execCtx) refreshPlayHosts() {
 	still := make([]string, 0, len(ec.playHostsAll))
 	for _, name := range ec.playHostsAll {
-		if st, ok := ec.states[name]; ok && st.failed {
+		if st, ok := ec.states[name]; ok && st.isFailed() {
 			continue
 		}
 		still = append(still, name)
@@ -914,7 +952,7 @@ func (ec *execCtx) applySafetyLimits(task Task, active []string, pr *PlayResult)
 	// compares its whole failed-host set against the batch size.
 	failed := 0
 	for _, st := range ec.states {
-		if st.failed {
+		if st.isFailed() {
 			failed++
 		}
 	}
@@ -939,11 +977,7 @@ func (ec *execCtx) applySafetyLimits(task Task, active []string, pr *PlayResult)
 	}
 
 	for _, h := range active {
-		st := ec.states[h]
-		if st.failed {
-			continue
-		}
-		st.failed = true
+		ec.states[h].setFailed(true)
 	}
 	ec.playAborted = true
 	return nil
@@ -1016,7 +1050,7 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 	if len(task.Rescue) > 0 && len(newlyFailed) > 0 {
 		for _, h := range newlyFailed {
 			st := ec.states[h]
-			st.failed = false
+			st.setFailed(false)
 			// Real sets these as nonpersistent FACTS the moment a
 			// block starts rescuing, which is why they are still
 			// readable in always: and after the block — measured, not
@@ -1031,7 +1065,7 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 			pr.recordRescued(h)
 		}
 		for _, h := range rescueFailed {
-			ec.states[h].failed = true
+			ec.states[h].setFailed(true)
 		}
 		stillFailed = rescueFailed
 	}
@@ -1040,22 +1074,22 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 		saved := map[string]bool{}
 		for _, h := range originalActive {
 			saved[h] = contains(stillFailed, h)
-			ec.states[h].failed = false
+			ec.states[h].setFailed(false)
 		}
 		afterAlways := ec.runTaskList(ctx, task.Always, originalActive, pr)
 		alwaysFailed := diff(originalActive, afterAlways)
 		for _, h := range originalActive {
-			ec.states[h].failed = saved[h] || contains(alwaysFailed, h)
+			ec.states[h].setFailed(saved[h] || contains(alwaysFailed, h))
 		}
 	} else {
 		for _, h := range stillFailed {
-			ec.states[h].failed = true
+			ec.states[h].setFailed(true)
 		}
 	}
 
 	var finalActive []string
 	for _, h := range originalActive {
-		if !ec.states[h].failed {
+		if !ec.states[h].isFailed() {
 			finalActive = append(finalActive, h)
 		}
 	}
@@ -1208,7 +1242,7 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 		for _, h := range runOn {
 			st := ec.states[h]
 			if ec.runTaskOnHost(ctx, task, st, pr, isHandler) {
-				st.failed = true
+				st.setFailed(true)
 			} else {
 				succeeded[h] = true
 			}
@@ -1228,7 +1262,7 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 				failed := ec.runTaskOnHost(ctx, task, st, pr, isHandler)
 				mu.Lock()
 				if failed {
-					st.failed = true
+					st.setFailed(true)
 				} else {
 					succeeded[h] = true
 				}
@@ -1515,7 +1549,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 	if task.ArgsError != "" {
 		ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module,
 			Failed: true, Ignored: task.IgnoreErrors, Msg: "Task failed: " + task.ArgsError})
-		st.failed = true
+		st.setFailed(true)
 		return !task.IgnoreErrors
 	}
 
@@ -1530,7 +1564,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, BannerOnly: true})
 		if err := ec.runMeta(ctx, task.Args, st, pr); err != nil {
 			ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: err.Error()})
-			st.failed = true
+			st.setFailed(true)
 			return !task.IgnoreErrors
 		}
 		return false
@@ -2790,7 +2824,7 @@ func (ec *execCtx) runHandlers(ctx context.Context, order []string, pr *PlayResu
 		var toRun []string
 		for _, h := range order {
 			st := ec.states[h]
-			if (!st.failed || ec.engine.ForceHandlers) && st.notify[i] {
+			if (!st.isFailed() || ec.engine.ForceHandlers) && st.notify[i] {
 				toRun = append(toRun, h)
 			}
 		}
@@ -2833,10 +2867,25 @@ func withResult(vars map[string]any, result map[string]any) map[string]any {
 	return out
 }
 
+// isFailed and setFailed are the only way to touch the flag, because
+// under the free strategy it is read across goroutines -- see the
+// comment on hostState.failedMu.
+func (st *hostState) isFailed() bool {
+	st.failedMu.Lock()
+	defer st.failedMu.Unlock()
+	return st.failed
+}
+
+func (st *hostState) setFailed(v bool) {
+	st.failedMu.Lock()
+	st.failed = v
+	st.failedMu.Unlock()
+}
+
 func activeHosts(states map[string]*hostState, order []string) []string {
 	var out []string
 	for _, h := range order {
-		if !states[h].failed {
+		if !states[h].isFailed() {
 			out = append(out, h)
 		}
 	}
