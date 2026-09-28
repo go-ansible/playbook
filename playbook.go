@@ -12,6 +12,7 @@ import (
 	"github.com/go-ansible/vault"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -1192,6 +1193,22 @@ func includeTasksTask(ctx parseCtx, t Task, key string, v any) (Task, error) {
 // (a role name string, or a mapping with name:/role: plus optional
 // vars:) into the same synthetic-block shape as a play-level roles:
 // entry.
+// includeRoleOptions are the keys real accepts INSIDE an
+// include_role:/import_role: mapping. Anything else is refused by name
+// -- measured: `include_role: {name: r, vars: {...}}` gives
+//
+//	[ERROR]: Invalid options for include_role: vars
+//
+// which matters because this port used to accept exactly that form and
+// honour it, while DROPPING the task-level vars: real does honour. It
+// had the two the wrong way round.
+var includeRoleOptions = map[string]bool{
+	"name": true, "role": true,
+	"tasks_from": true, "vars_from": true, "defaults_from": true,
+	"handlers_from": true, "allow_duplicates": true, "public": true,
+	"rolespec_validate": true, "apply": true,
+}
+
 func includeRoleTask(ctx parseCtx, t Task, key string, v any) (Task, error) {
 	var ref RoleRef
 	switch r := v.(type) {
@@ -1199,8 +1216,19 @@ func includeRoleTask(ctx parseCtx, t Task, key string, v any) (Task, error) {
 		ref = RoleRef{Name: r}
 	case map[string]any:
 		ref.Name = str(firstNonNil(r["name"], r["role"]))
-		if vv, ok := r["vars"].(map[string]any); ok {
-			ref.Vars = vv
+		var bad []string
+		for k := range r {
+			if !includeRoleOptions[k] {
+				bad = append(bad, k)
+			}
+		}
+		if len(bad) > 0 {
+			// Real lists them comma-separated with no space, in its
+			// own dict order -- which is document order in Python. A
+			// Go map has none, so these are SORTED: deterministic, and
+			// the same set either way.
+			sort.Strings(bad)
+			return t, fmt.Errorf("Invalid options for %s: %s", key, strings.Join(bad, ","))
 		}
 	default:
 		return t, fmt.Errorf("task %q: %s: unsupported shape %T", t.Name, key, v)
@@ -1219,6 +1247,20 @@ func includeRoleTask(ctx parseCtx, t Task, key string, v any) (Task, error) {
 	}
 	roleT.When = t.When
 	roleT.Tags = t.Tags
+	// The task's OWN vars: reach the role, above its vars/main.yml and
+	// its defaults -- measured: with who: in defaults AND in
+	// vars/main.yml, a task-level `vars: {who: taskvars}` wins. This
+	// port dropped them entirely, so the documented way to parameterise
+	// a role did nothing.
+	roleT.Vars = t.Vars
+	if key == "include_role" {
+		// A DYNAMIC include announces itself: a TASK banner and
+		// "included: <role> for <host>", counted under ok. A static
+		// import_role announces nothing. IncludedFile carries the role
+		// NAME here rather than a path, because that is what real
+		// prints for a role.
+		roleT.IncludedFile = ref.Name
+	}
 	return roleT, nil
 }
 
