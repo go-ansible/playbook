@@ -3069,6 +3069,19 @@ func fqcn(module string) string {
 // because it is a contract between the two packages, not a coincidence.
 const lookupFailurePrefix = "The lookup plugin '"
 
+// undefinedValuePrefix is the second such boundary, and it exists
+// because real distinguishes an undefined VALUE from a plugin FAILURE
+// and prints them differently. Measured against ansible-core 2.21.4,
+// lookup('vars', 'nope') reports
+//
+//	Error while resolving value for 'msg': No variable named 'nope' was found.
+//
+// with no plugin named in front of it, while a non-string term reports
+// "The lookup plugin 'vars' failed: ...". The template package words
+// the first exactly as real does -- see its errUndefinedVar -- so this
+// can find it, for the same reason the prefix above exists.
+const undefinedValuePrefix = "No variable named '"
+
 // innermost strips this port's own wrapping off a template error, so
 // the message ends on the part real also prints — "'nope' is
 // undefined" — rather than on three layers of Go context in front of
@@ -3083,6 +3096,9 @@ func innermost(err error) error {
 	// side guarantees beats a list of prose fragments to strip, which
 	// silently stops matching the day gonja rewords one of them.
 	if i := strings.Index(msg, lookupFailurePrefix); i >= 0 {
+		return errors.New(msg[i:])
+	}
+	if i := strings.Index(msg, undefinedValuePrefix); i >= 0 {
 		return errors.New(msg[i:])
 	}
 	if i := strings.LastIndex(msg, ": "); i >= 0 {
