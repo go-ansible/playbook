@@ -52,7 +52,22 @@ func DefaultConnect(ctx context.Context, hostName string, hostVars map[string]an
 	explicitConnType, hasExplicitConnType := hostVars["ansible_connection"].(string)
 	isLocalHostname := hostName == "localhost" || hostName == "127.0.0.1"
 	if explicitConnType == "local" || (isLocalHostname && !hasExplicitConnType) {
-		return remoteexec.NewLocal(), nil
+		local := remoteexec.NewLocal()
+		// Real runs a local module with the working directory set to
+		// the PLAYBOOK's own directory, not to wherever
+		// ansible-playbook was invoked -- measured against ansible-core
+		// 2.21.4 from three different working directories, inside a
+		// role and out, with and without an explicit connection:
+		// keyword. So `read_csv: {path: files/data.csv}` resolves
+		// beside the playbook, and did not here: the same playbook
+		// worked or failed depending on where it was run from.
+		//
+		// It comes from playbook_dir rather than a new parameter
+		// because that is the magic variable REAL exposes for exactly
+		// this, the engine already publishes it, and a caller who
+		// replaces Connect gets it by the same route.
+		local.Dir = strVar(hostVars, "playbook_dir", "")
+		return local, nil
 	}
 
 	cfg := remoteexec.SSHConfig{
