@@ -1675,16 +1675,55 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 					result = result.WithExtra("changed_when_result", conditionalResultOf(cerr))
 				} else {
 					result.Changed = ok
+					// Real carries the BOOLEAN too, not only the error
+					// text: changed_when: false registers
+					// changed_when_result False. A task without the
+					// keyword has no such key at all, which is why this
+					// is inside the branch.
+					//
+					// changed_when does NOT touch failed: measured, a
+					// failing command with changed_when: true reports
+					// changed=True AND failed=True, keeping the
+					// module's own msg.
+					result = result.WithExtra("changed_when_result", ok)
 				}
 			}
-			if task.FailedWhen != "" && !result.Failed {
+			if task.FailedWhen != "" {
+				// NOT gated on the module's own verdict. failed_when
+				// REPLACES it, in both directions -- measured against
+				// ansible-core 2.21.4:
+				//
+				//	failed_when: false on a FAILING command
+				//	  -> failed=False, printed "changed: [host]",
+				//	     rc=1 and the module's own msg kept
+				//	failed_when: true on a SUCCEEDING command
+				//	  -> failed=True, msg REPLACED
+				//
+				// This port gated it on !result.Failed, so a module
+				// that had already failed never had its failed_when
+				// evaluated -- which made `failed_when: false`, the
+				// whole reason the keyword exists, do nothing at all.
 				ok, ferr := ec.evalWhen(task.FailedWhen, withResult(mergedVars, resultView))
 				if ferr != nil {
 					result.Failed = true
 					result.Msg = conditionalFailure("failed_when", ferr)
 					result = result.WithExtra("failed_when_result", conditionalResultOf(ferr))
 				} else {
+					wasFailed := result.Failed
 					result.Failed = ok
+					result = result.WithExtra("failed_when_result", ok)
+					switch {
+					case ok && !wasFailed:
+						// The expression is what failed the task, so
+						// real says so instead of leaving the module's
+						// (usually empty) msg.
+						result.Msg = conditionalEvaluatedTo("failed_when", true)
+					case !ok && wasFailed:
+						// The module's own msg SURVIVES being
+						// forgiven: real still reports "The command
+						// exited with a non-zero return code." on a
+						// task it no longer counts as failed.
+					}
 				}
 			}
 
@@ -3169,6 +3208,20 @@ func conditionalFailure(keyword string, err error) string {
 		return fmt.Sprintf("Task failed: A 'when' expression failed: Error while evaluating conditional: %v", innermost(err))
 	}
 	return fmt.Sprintf("Task failed: Action failed: A '%s' expression failed: Error while evaluating conditional: %v", keyword, innermost(err))
+}
+
+// conditionalEvaluatedTo words the failure of a task that its own
+// conditional failed, rather than its module -- measured:
+//
+//	Task failed: Action failed: A 'failed_when' expression evaluated to 'True'.
+//
+// Note the Python spelling of the boolean, which is what real prints.
+func conditionalEvaluatedTo(keyword string, value bool) string {
+	spelt := "False"
+	if value {
+		spelt = "True"
+	}
+	return fmt.Sprintf("Task failed: Action failed: A '%s' expression evaluated to '%s'.", keyword, spelt)
 }
 
 // fqcn qualifies a module name the way real reports it in an error.
