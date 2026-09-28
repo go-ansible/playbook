@@ -78,6 +78,20 @@ type Engine struct {
 	// A nil Warn is silent, not a panic.
 	Warn Warner
 
+	// failedHosts are the hosts that have failed in a play already run.
+	// Real Ansible drops such a host for the REST of the playbook, and
+	// that is what makes a failure in play 1 stop the same host being
+	// deployed to in play 2. Kept on the Engine rather than the play's
+	// execCtx precisely because it must outlive the play.
+	failedHosts map[string]bool
+
+	// playbookAborted records that a safety brake -- any_errors_fatal
+	// or max_fail_percentage -- has ended the whole RUN, not just its
+	// play. Real stops the playbook there: measured, a second play
+	// after either brake trips is never bannered at all, even when it
+	// targets hosts that never failed.
+	playbookAborted bool
+
 	// Forks caps how many hosts run concurrently at once — connecting/
 	// gathering facts, and each task/handler fan-out (runSingleTask,
 	// runFree) all respect it — matching real Ansible's own forks
@@ -231,6 +245,16 @@ type hostState struct {
 	// followed by another that tries again.
 	connErr error
 
+	// failedMu guards failed. Under the FREE strategy one goroutine
+	// per host runs the whole task list, and applySafetyLimits reads
+	// EVERY host's flag from whichever goroutine reached it -- while
+	// that host's own goroutine may be writing it. A pre-existing
+	// data race, shipped, and in the safety brake itself: a stale
+	// false there means a rollout that should have stopped does not.
+	// Found by a -race run of the free path, which nothing exercised
+	// before.
+	failedMu sync.Mutex
+
 	// currentTask is what this host is running right now, and
 	// lastFailedTask/lastFailedResult are the most recent failure —
 	// what a rescue: block reads back as ansible_failed_task and
@@ -246,7 +270,7 @@ type hostState struct {
 	lastFailedTask   Task
 	lastFailedResult map[string]any
 
-	failed bool
+	failed bool // guarded by failedMu; use isFailed/setFailed
 	// notify holds the INDICES of the play's handlers this host has
 	// notified, not their names: a notification can reach several
 	// handlers at once through listen:, and two handlers may share a
@@ -285,6 +309,11 @@ type execCtx struct {
 	// tripped. It stops the whole PLAY, not just this batch: a rolling
 	// update that gives up must not roll on to the next batch.
 	playAborted bool
+
+	// playHostsAll is every host the PLAY matched, across all serial
+	// batches -- ansible_play_hosts_all, and the starting value of
+	// ansible_play_hosts.
+	playHostsAll []string
 }
 
 // acquire blocks until a fork slot is free (a no-op when ec.sem is nil,
@@ -337,6 +366,11 @@ func (e *Engine) RunPlaybook(ctx context.Context, pb Playbook) (*RunResult, erro
 		}
 	}()
 	for _, play := range pb {
+		// any_errors_fatal ended the RUN, not just its play: real
+		// never banners what comes after, so neither does this.
+		if e.playbookAborted {
+			break
+		}
 		if err := e.applyVarsPrompt(&play); err != nil {
 			return rr, fmt.Errorf("play %q: vars_prompt: %w", play.Name, err)
 		}
@@ -426,6 +460,14 @@ func (e *Engine) runPlay(ctx context.Context, play Play) (*PlayResult, error) {
 	if hosts, err = e.applyLimit(hosts); err != nil {
 		return pr, fmt.Errorf("play %q: %w", play.Name, err)
 	}
+	// A host that FAILED leaves the run: real Ansible drops it for
+	// every remaining play, which is what makes a failure in play 1
+	// stop that host being deployed to in play 2. Measured -- a play
+	// after one where h1 failed runs on h2..h5 only, and the recap
+	// shows h1 with ok=0 for the rest of the playbook. This port kept
+	// running it, so a host that had just failed its own prerequisites
+	// went on to receive everything after them.
+	hosts = e.dropFailedHosts(hosts)
 
 	// serial: splits the matched hosts into batches, each batch running
 	// every task and then every handler to completion before the next
@@ -439,6 +481,12 @@ func (e *Engine) runPlay(ctx context.Context, play Play) (*PlayResult, error) {
 	// without serial: has one batch, so this is unchanged for it — and
 	// a play that matched no hosts still has one (empty) batch, so it
 	// is still bannered.
+	// Every host the PLAY matched, across all its serial batches --
+	// ansible_play_hosts_all, and where ansible_play_hosts starts.
+	playHostsAll := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		playHostsAll = append(playHostsAll, h.Name)
+	}
 	for _, batch := range batchHosts(hosts, play.Serial) {
 		names := make([]string, 0, len(batch))
 		for _, h := range batch {
@@ -447,13 +495,41 @@ func (e *Engine) runPlay(ctx context.Context, play Play) (*PlayResult, error) {
 		for _, cb := range e.Callbacks {
 			cb.OnPlayStart(play, names)
 		}
-		if e.runBatch(ctx, play, batch, pr) {
+		if e.runBatch(ctx, play, batch, playHostsAll, pr) {
 			// any_errors_fatal or max_fail_percentage gave up: the
 			// remaining batches are not attempted.
 			break
 		}
 	}
 	return pr, nil
+}
+
+// dropFailedHosts removes the hosts that failed in an earlier play.
+func (e *Engine) dropFailedHosts(hosts []*inventory.Host) []*inventory.Host {
+	if len(e.failedHosts) == 0 {
+		return hosts
+	}
+	out := hosts[:0:0]
+	for _, h := range hosts {
+		if !e.failedHosts[h.Name] {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// noteFailedHosts records the hosts that failed in the play just run,
+// so later plays skip them.
+func (e *Engine) noteFailedHosts(ec *execCtx) {
+	for name, st := range ec.states {
+		if !st.isFailed() {
+			continue
+		}
+		if e.failedHosts == nil {
+			e.failedHosts = map[string]bool{}
+		}
+		e.failedHosts[name] = true
+	}
 }
 
 // batchHosts splits hosts into the rolling-update batches serial asks
@@ -534,10 +610,11 @@ func pctToInt(value string, total int) int {
 
 // Returns whether a safety limit stopped the play, in which case no
 // later batch runs.
-func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Host, pr *PlayResult) (aborted bool) {
+func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Host, playHostsAll []string, pr *PlayResult) (aborted bool) {
 	ec := &execCtx{
 		engine:        e,
 		play:          play,
+		playHostsAll:  playHostsAll,
 		states:        make(map[string]*hostState, len(hosts)),
 		delegateConns: map[string]remoteexec.Connection{},
 	}
@@ -573,8 +650,29 @@ func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Hos
 		}
 		vc.SetVar(vars.Inventory, "groups", groupsVar)
 		vc.SetVar(vars.Inventory, "hostvars", hostvarsVar)
-		vc.SetVar(vars.Inventory, "ansible_play_hosts", playHosts)
+		// Three variables, three different things -- measured under
+		// serial: 2 over five hosts:
+		//
+		//	batch=['h1','h2']  hosts=[all five]  all=[all five]
+		//
+		// ansible_play_batch is the BATCH; ansible_play_hosts is the
+		// play's hosts, NOT limited by serial, and shrinks as hosts
+		// fail; ansible_play_hosts_all is the play's hosts at its
+		// start and never shrinks. This port set the first two to the
+		// batch and had no third, so under serial: a template asking
+		// "who else is in this play" saw only its own batch.
 		vc.SetVar(vars.Inventory, "ansible_play_batch", playHosts)
+		// Two writers, for two paths, and that is not an accident.
+		// This is the value the FREE strategy uses, where
+		// refreshPlayHosts does not run at all; on the linear path the
+		// first refresh replaces it before any task reads it.
+		//
+		// Removing this line looked right -- a neuter putting the
+		// BATCH back in it passed, since linear overwrites it -- and
+		// broke free, where ansible_play_hosts became undefined. "Dead
+		// on the path I was looking at" is not dead.
+		vc.SetVar(vars.Inventory, "ansible_play_hosts", ec.playHostsAll)
+		vc.SetVar(vars.Inventory, "ansible_play_hosts_all", ec.playHostsAll)
 		vc.SetVar(vars.Inventory, "inventory_dir", e.Inventory.SourceDir)
 		vc.SetVar(vars.Inventory, "playbook_dir", playbookDir)
 		vc.Set(vars.ExtraVars, e.ExtraVars)
@@ -610,10 +708,32 @@ func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Hos
 	if play.Strategy == "free" && e.Forks != 1 {
 		ec.free = true
 		runFree(ctx, ec, play, active, pr)
+		e.noteFailedHosts(ec)
+		if ec.playAborted {
+			e.playbookAborted = true
+		}
 		return ec.playAborted
 	}
 	active = ec.runTaskList(ctx, play.Tasks, active, pr)
 	ec.runHandlers(ctx, order, pr)
+	e.noteFailedHosts(ec)
+	// EITHER brake ends the whole RUN, not just its play. Measured
+	// both ways round, because one reading is not enough:
+	//
+	//	any_errors_fatal, play 2 on hosts that NEVER failed
+	//	  -> play 2 is not bannered at all
+	//	max_fail_percentage: 10 with 1 of 5 failed (20% > 10%)
+	//	  -> the rest of the play AND the next play are skipped
+	//	max_fail_percentage: 50 with the same 20% failed
+	//	  -> nothing stops, because the brake never TRIPPED
+	//
+	// The third case is why an earlier reading here said
+	// max_fail_percentage stopped only its play: that run had simply
+	// stayed under the threshold, and a comment said so as if it were
+	// the rule.
+	if ec.playAborted {
+		e.playbookAborted = true
+	}
 	return ec.playAborted
 }
 
@@ -699,7 +819,7 @@ func (ec *execCtx) reportUnreachable(pr *PlayResult, st *hostState, task Task, e
 	if ignored {
 		return false
 	}
-	st.failed = true
+	st.setFailed(true)
 	return true
 }
 
@@ -733,7 +853,7 @@ func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *Pla
 			gathered, err := facts.Gather(ctx, conn)
 			if err != nil {
 				mu.Lock()
-				st.failed = true
+				st.setFailed(true)
 				ec.report(pr, Result{Host: st.name, Task: gatheringFactsTask, Failed: true, Msg: err.Error()})
 				mu.Unlock()
 				return
@@ -755,6 +875,31 @@ func (ec *execCtx) runTaskList(ctx context.Context, tasks []Task, active []strin
 		if len(active) == 0 {
 			return active
 		}
+		// ansible_play_hosts SHRINKS as hosts fail, while
+		// ansible_play_hosts_all does not -- measured: before a
+		// failure both read [h1..h5], and the task after it reads
+		// hosts=[h2..h5] all=[h1..h5]. Refreshed here rather than set
+		// once per play, because "once" cannot shrink.
+		//
+		// LINEAR ONLY, and that is real's behaviour rather than a
+		// concession. Measured with h1 failing under `strategy: free`:
+		//
+		//	-f 5  every other host still reports hosts=5
+		//	-f 1  every other host reports hosts=4
+		//
+		// The second is not a contradiction: with ONE fork a free play
+		// runs linearly, which is exactly why this port routes that
+		// case through the linear path already. Both sides agree on
+		// both.
+		//
+		// It is also what the concurrency contract requires -- free
+		// runs one goroutine per host and each touches only ITS OWN
+		// vars.Context, so writing every host's from every goroutine is
+		// a data race. It WAS one: CI caught "fatal error: concurrent
+		// map writes" on riscv64, in this exact call.
+		if !ec.free {
+			ec.refreshPlayHosts()
+		}
 		if task.IsBlock() {
 			active = ec.runBlock(ctx, task, active, pr)
 		} else {
@@ -765,6 +910,26 @@ func (ec *execCtx) runTaskList(ctx context.Context, tasks []Task, active []strin
 		active = ec.applySafetyLimits(task, active, pr)
 	}
 	return active
+}
+
+// refreshPlayHosts re-publishes ansible_play_hosts as the play's hosts
+// that have NOT failed. ansible_play_hosts_all is left alone: it is the
+// play's roster at its start, and real never shrinks it.
+//
+// Called from the LINEAR path only -- see its call site. It writes
+// every host's vars.Context, which is safe only where one goroutine
+// owns them all.
+func (ec *execCtx) refreshPlayHosts() {
+	still := make([]string, 0, len(ec.playHostsAll))
+	for _, name := range ec.playHostsAll {
+		if st, ok := ec.states[name]; ok && st.isFailed() {
+			continue
+		}
+		still = append(still, name)
+	}
+	for _, st := range ec.states {
+		st.vc.SetVar(vars.Inventory, "ansible_play_hosts", still)
+	}
 }
 
 // applySafetyLimits stops the play when any_errors_fatal or
@@ -787,7 +952,7 @@ func (ec *execCtx) applySafetyLimits(task Task, active []string, pr *PlayResult)
 	// compares its whole failed-host set against the batch size.
 	failed := 0
 	for _, st := range ec.states {
-		if st.failed {
+		if st.isFailed() {
 			failed++
 		}
 	}
@@ -812,11 +977,7 @@ func (ec *execCtx) applySafetyLimits(task Task, active []string, pr *PlayResult)
 	}
 
 	for _, h := range active {
-		st := ec.states[h]
-		if st.failed {
-			continue
-		}
-		st.failed = true
+		ec.states[h].setFailed(true)
 	}
 	ec.playAborted = true
 	return nil
@@ -889,7 +1050,7 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 	if len(task.Rescue) > 0 && len(newlyFailed) > 0 {
 		for _, h := range newlyFailed {
 			st := ec.states[h]
-			st.failed = false
+			st.setFailed(false)
 			// Real sets these as nonpersistent FACTS the moment a
 			// block starts rescuing, which is why they are still
 			// readable in always: and after the block — measured, not
@@ -904,7 +1065,7 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 			pr.recordRescued(h)
 		}
 		for _, h := range rescueFailed {
-			ec.states[h].failed = true
+			ec.states[h].setFailed(true)
 		}
 		stillFailed = rescueFailed
 	}
@@ -913,22 +1074,22 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 		saved := map[string]bool{}
 		for _, h := range originalActive {
 			saved[h] = contains(stillFailed, h)
-			ec.states[h].failed = false
+			ec.states[h].setFailed(false)
 		}
 		afterAlways := ec.runTaskList(ctx, task.Always, originalActive, pr)
 		alwaysFailed := diff(originalActive, afterAlways)
 		for _, h := range originalActive {
-			ec.states[h].failed = saved[h] || contains(alwaysFailed, h)
+			ec.states[h].setFailed(saved[h] || contains(alwaysFailed, h))
 		}
 	} else {
 		for _, h := range stillFailed {
-			ec.states[h].failed = true
+			ec.states[h].setFailed(true)
 		}
 	}
 
 	var finalActive []string
 	for _, h := range originalActive {
-		if !ec.states[h].failed {
+		if !ec.states[h].isFailed() {
 			finalActive = append(finalActive, h)
 		}
 	}
@@ -1081,7 +1242,7 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 		for _, h := range runOn {
 			st := ec.states[h]
 			if ec.runTaskOnHost(ctx, task, st, pr, isHandler) {
-				st.failed = true
+				st.setFailed(true)
 			} else {
 				succeeded[h] = true
 			}
@@ -1101,7 +1262,7 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 				failed := ec.runTaskOnHost(ctx, task, st, pr, isHandler)
 				mu.Lock()
 				if failed {
-					st.failed = true
+					st.setFailed(true)
 				} else {
 					succeeded[h] = true
 				}
@@ -1388,7 +1549,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 	if task.ArgsError != "" {
 		ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module,
 			Failed: true, Ignored: task.IgnoreErrors, Msg: "Task failed: " + task.ArgsError})
-		st.failed = true
+		st.setFailed(true)
 		return !task.IgnoreErrors
 	}
 
@@ -1403,7 +1564,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, BannerOnly: true})
 		if err := ec.runMeta(ctx, task.Args, st, pr); err != nil {
 			ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: err.Error()})
-			st.failed = true
+			st.setFailed(true)
 			return !task.IgnoreErrors
 		}
 		return false
@@ -2663,7 +2824,7 @@ func (ec *execCtx) runHandlers(ctx context.Context, order []string, pr *PlayResu
 		var toRun []string
 		for _, h := range order {
 			st := ec.states[h]
-			if (!st.failed || ec.engine.ForceHandlers) && st.notify[i] {
+			if (!st.isFailed() || ec.engine.ForceHandlers) && st.notify[i] {
 				toRun = append(toRun, h)
 			}
 		}
@@ -2706,10 +2867,25 @@ func withResult(vars map[string]any, result map[string]any) map[string]any {
 	return out
 }
 
+// isFailed and setFailed are the only way to touch the flag, because
+// under the free strategy it is read across goroutines -- see the
+// comment on hostState.failedMu.
+func (st *hostState) isFailed() bool {
+	st.failedMu.Lock()
+	defer st.failedMu.Unlock()
+	return st.failed
+}
+
+func (st *hostState) setFailed(v bool) {
+	st.failedMu.Lock()
+	st.failed = v
+	st.failedMu.Unlock()
+}
+
 func activeHosts(states map[string]*hostState, order []string) []string {
 	var out []string
 	for _, h := range order {
-		if !states[h].failed {
+		if !states[h].isFailed() {
 			out = append(out, h)
 		}
 	}
