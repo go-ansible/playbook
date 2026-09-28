@@ -1511,6 +1511,12 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		if looping {
 			iter = scope.Child()
 			iter.SetVar(vars.TaskVars, task.LoopVar, item)
+			// Real sets ansible_loop_var on EVERY iteration of EVERY
+			// loop, naming the variable the item is bound to -- "item"
+			// unless loop_control.loop_var renamed it. A role that
+			// cannot know what its caller named the loop variable
+			// reads it from here; this port left it undefined.
+			iter.SetVar(vars.TaskVars, "ansible_loop_var", task.LoopVar)
 			if task.LoopLabel != "" {
 				// Rendered with the item already in scope, so
 				// `label: "{{ item.name }}"` resolves per iteration.
@@ -1521,6 +1527,17 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			if task.IndexVar != "" {
 				// loop_control.index_var, 0-based as in real Ansible.
 				iter.SetVar(vars.TaskVars, task.IndexVar, index)
+				// And its name, the same way ansible_loop_var carries
+				// the loop variable's. Real sets this one ONLY when
+				// index_var was asked for -- measured: without it,
+				// `ansible_index_var is defined` is false.
+				iter.SetVar(vars.TaskVars, "ansible_index_var", task.IndexVar)
+			}
+			// loop_control.extended publishes the ansible_loop dict.
+			// Without it real leaves ansible_loop UNDEFINED rather
+			// than empty, so this is set only when asked for.
+			if task.LoopExtended {
+				iter.SetVar(vars.TaskVars, "ansible_loop", extendedLoopVars(items, index, task.LoopExtendedAllItems))
 			}
 
 			// Now that `item` is bound, the condition can be asked
@@ -1763,6 +1780,50 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		if result.Failed {
 			anyFailed = true
 		}
+		// loop_control.break_when, evaluated once the iteration has
+		// RUN but before it is reported, because its outcome becomes
+		// part of that report.
+		//
+		// Measured against ansible-core 2.21.4: every iteration of a
+		// loop that sets break_when carries break_when_result, holding
+		// the BOOLEAN the condition evaluated to -- False, then True on
+		// the one that ends the loop. A loop without break_when carries
+		// no such key at all.
+		//
+		// The task's result is NOT in scope here, unlike until:. A
+		// break_when naming `stdout` fails with "'stdout' is
+		// undefined" in real too -- measured, and it is why this uses
+		// iter.Merged() rather than the withResult() the retry loop
+		// above uses.
+		//
+		// An expression that will not evaluate does not raise a
+		// separate result: real puts the ERROR TEXT in
+		// break_when_result, marks that iteration failed, and prints
+		// ONE line carrying the module's own keys alongside it.
+		breakNow := false
+		if looping && task.LoopBreakWhen != "" {
+			brk, berr := ec.evalWhen(task.LoopBreakWhen, ec.engine.resolved(iter.Merged()))
+			switch {
+			case berr != nil:
+				text := conditionalResultOf(berr)
+				result = result.WithExtra("break_when_result", text)
+				attemptView["break_when_result"] = text
+				result.Failed = true
+				anyFailed = true
+				breakNow = true
+			default:
+				// Into the REGISTERED result only, not the printed
+				// one. Measured: a successful iteration's line shows
+				// just its module's own keys -- `debug` prints `msg`
+				// and nothing else -- while
+				// `r.results | map(attribute='break_when_result')`
+				// reads [False, True]. A failing one prints it, which
+				// is why the error branch above puts it in both.
+				attemptView["break_when_result"] = brk
+				breakNow = brk
+			}
+		}
+
 		lastResult = result
 		lastExtra = attemptView
 
@@ -1818,6 +1879,15 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		}
 		for k, v := range factVars {
 			st.vc.SetVar(layer, k, v)
+		}
+
+		// After the report, never before it: real prints the item that
+		// triggered break_when and THEN stops. That ordering is the
+		// whole difference from when:, which decides whether an
+		// iteration runs at all -- break_when: ["item == 2"] over
+		// [1,2,3] shows 1 and 2 and never reaches 3.
+		if breakNow {
+			break
 		}
 	}
 
@@ -3270,6 +3340,44 @@ func (e *Engine) hostvarsVar(groups map[string]any) map[string]any {
 		}
 		merged["groups"] = groups
 		out[name] = merged
+	}
+	return out
+}
+
+// extendedLoopVars is real's ansible_loop dict, published to an
+// iteration when loop_control.extended is set. Ported from
+// ansible/_internal/_task.py's start_loop, key for key:
+//
+//	index index0 first last length revindex revindex0
+//	allitems nextitem previtem
+//
+// nextitem and previtem are ABSENT at the ends rather than null --
+// real catches the IndexError and checks index-1 >= 0, so the first
+// item has no previtem and the last has no nextitem. A template
+// reading one of them there gets an undefined, which is why the
+// measured reference for those cells is `default('<none>')`.
+//
+// allitems is governed by loop_control.extended_allitems, which real
+// defaults to TRUE; only an explicit false drops the key.
+func extendedLoopVars(items []any, index int, allItems *bool) map[string]any {
+	n := len(items)
+	out := map[string]any{
+		"index":     index + 1,
+		"index0":    index,
+		"first":     index == 0,
+		"last":      index+1 == n,
+		"length":    n,
+		"revindex":  n - index,
+		"revindex0": n - index - 1,
+	}
+	if allItems == nil || *allItems {
+		out["allitems"] = items
+	}
+	if index+1 < n {
+		out["nextitem"] = items[index+1]
+	}
+	if index-1 >= 0 {
+		out["previtem"] = items[index-1]
 	}
 	return out
 }

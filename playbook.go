@@ -172,7 +172,31 @@ type Task struct {
 	// `(item=...)` of each iteration INSTEAD of the item itself, so a
 	// loop over big dicts stays readable. It is a template, rendered
 	// per item.
-	LoopLabel    string
+	LoopLabel string
+
+	// LoopExtended is loop_control.extended: it publishes the
+	// ansible_loop dict to each iteration. Off by default, and real's
+	// ansible_loop is then UNDEFINED rather than empty -- measured.
+	LoopExtended bool
+
+	// LoopExtendedAllItems is loop_control.extended_allitems, which
+	// decides whether ansible_loop carries the whole item list. Real
+	// defaults it to TRUE, so it is a pointer: absent means true, and
+	// only an explicit false drops the key.
+	LoopExtendedAllItems *bool
+
+	// LoopBreakWhen is loop_control.break_when, already normalized to
+	// one expression. It is evaluated AFTER each iteration, and when
+	// it holds the loop ends -- the iteration that triggered it has
+	// already run and reported, which is what makes break_when
+	// different from when:.
+	//
+	// A LIST of conditions is AND-ed, like every other Ansible
+	// conditional. Measured: break_when: ["item == 2", "item == 3"]
+	// never holds and all three items run, while
+	// ["item >= 2", "item is even"] stops after item 2.
+	LoopBreakWhen string
+
 	Register     string
 	IgnoreErrors bool
 
@@ -954,6 +978,12 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 		}
 		t.LoopPause = floatDefault(lc["pause"], 0)
 		t.LoopLabel = str(lc["label"])
+		t.LoopExtended = boolDefault(lc["extended"], false)
+		if v, ok := lc["extended_allitems"]; ok {
+			b := boolDefault(v, true)
+			t.LoopExtendedAllItems = &b
+		}
+		t.LoopBreakWhen = normalizeWhen(lc["break_when"])
 	}
 	if v, ok := m["become"]; ok {
 		b := boolDefault(v, false)
