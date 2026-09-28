@@ -1437,6 +1437,51 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		}
 	}
 
+	// A loop with NOTHING to iterate is a SKIP, not a silence. Real
+	// banners the task and prints "skipping: [host]", and the recap
+	// counts it under skipped -- task_executor returns
+	// skipped=True, skipped_reason='No items in the list', results=[]
+	// before it ever reaches an iteration.
+	//
+	// This port simply ran a zero-trip loop, so the task left no trace
+	// at all: no banner, no line, skipped=0. Measured on three
+	// spellings that all behave the same in real -- `with_items: []`,
+	// `loop:` over an empty variable, and a with_fileglob matching
+	// nothing -- and on none of them did this port print anything.
+	//
+	// The result is NOT marked Looped: real prints a bare
+	// "skipping: [host]" with no "(item=...)", because no item exists.
+	if looping && len(items) == 0 {
+		ec.report(pr, Result{
+			Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module,
+			Skipped: true,
+			Extra: map[string]any{
+				// Real carries the reason under BOTH names. skip_reason
+				// is the one a when-skip also has; skipped_reason is
+				// particular to this case, and a playbook telling the
+				// two apart reads it.
+				"skip_reason":    emptyLoopReason,
+				"skipped_reason": emptyLoopReason,
+				"results":        []any{},
+			},
+		})
+		if task.Register != "" {
+			st.vc.SetVar(vars.Registered, task.Register, map[string]any{
+				"changed":        false,
+				"failed":         false,
+				"skipped":        true,
+				"skip_reason":    emptyLoopReason,
+				"skipped_reason": emptyLoopReason,
+				"results":        []any{},
+			})
+		}
+		// false, not true: this function's caller reads a true as a
+		// FAILURE (st.failed = true), and a skip is not one. The
+		// when:false skip a few lines up returns false for the same
+		// reason.
+		return false
+	}
+
 	anyChanged, anyFailed := false, false
 	var lastResult modules.Result
 	var lastExtra map[string]any
@@ -3067,6 +3112,10 @@ func fqcn(module string) string {
 // lookupFailurePrefix is how the template package words a strict
 // lookup failure, which is how real words it. Shared here as a constant
 // because it is a contract between the two packages, not a coincidence.
+// emptyLoopReason is real's own wording for a loop with no items, in
+// both skip_reason and skipped_reason.
+const emptyLoopReason = "No items in the list"
+
 const lookupFailurePrefix = "The lookup plugin '"
 
 // undefinedValuePrefix is the second such boundary, and it exists
