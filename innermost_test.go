@@ -34,6 +34,12 @@ func TestInnermostBoundaries(t *testing.T) {
 			want: `'nope' is undefined`,
 		},
 		{
+			// no_such_name | mandatory
+			name: "a filter failure keeps the filter's name",
+			in:   `template: evaluating expression "no_such_name | mandatory": unable to evaluate filter &{<Token[Name] Val='mandatory' Pos=18 Line=1 Col=19> mandatory [] map[]}: invalid call to filter 'mandatory': The filter plugin 'ansible.builtin.mandatory' failed: Mandatory variable 'no_such_name' not defined.`,
+			want: `The filter plugin 'ansible.builtin.mandatory' failed: Mandatory variable 'no_such_name' not defined.`,
+		},
+		{
 			name: "anything else is left alone",
 			in:   "something this port has no boundary for",
 			want: "something this port has no boundary for",

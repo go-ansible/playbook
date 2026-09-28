@@ -3182,6 +3182,17 @@ func fqcn(module string) string {
 // lookupFailurePrefix is how the template package words a strict
 // lookup failure, which is how real words it. Shared here as a constant
 // because it is a contract between the two packages, not a coincidence.
+// filterFailurePrefix is the third such boundary, and the template
+// package exports it (as FilterFailurePrefix) for exactly this. Real
+// words a filter plugin's own refusal
+//
+//	The filter plugin 'ansible.builtin.mandatory' failed: <reason>
+//
+// while gonja puts several layers of its own prose in front of it --
+// "unable to evaluate filter &{<Token[Name] Val='mandatory' ...}" --
+// which real has no equivalent of and never prints.
+const filterFailurePrefix = template.FilterFailurePrefix
+
 // emptyLoopReason is real's own wording for a loop with no items, in
 // both skip_reason and skipped_reason.
 const emptyLoopReason = "No items in the list"
@@ -3215,6 +3226,9 @@ func innermost(err error) error {
 	// side guarantees beats a list of prose fragments to strip, which
 	// silently stops matching the day gonja rewords one of them.
 	if i := strings.Index(msg, lookupFailurePrefix); i >= 0 {
+		return errors.New(msg[i:])
+	}
+	if i := strings.Index(msg, filterFailurePrefix); i >= 0 {
 		return errors.New(msg[i:])
 	}
 	if i := strings.Index(msg, undefinedValuePrefix); i >= 0 {
