@@ -1580,7 +1580,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				resolveLocalSrc(task, args, searchPathDirs(task, st.vc))
 				// Real Ansible sends _ansible_diff to every module,
 				// whether or not it knows what to do with one.
-				if ec.engine.DiffMode && args != nil {
+				if ec.diffFor(task) && args != nil {
 					args[modules.DiffModeKey] = true
 				}
 				if env := ec.taskEnvironment(task, mergedVars); len(env) > 0 && args != nil {
@@ -2391,6 +2391,16 @@ func searchPathDirs(task Task, vc *vars.Context) []string {
 		out = append(out, playbookDir)
 	}
 	return out
+}
+
+// diffFor is whether this task runs in diff mode: its own `diff:`
+// keyword when it has one, and --diff otherwise. Measured against real,
+// the keyword wins in both directions.
+func (ec *execCtx) diffFor(task Task) bool {
+	if task.Diff != nil {
+		return *task.Diff
+	}
+	return ec.engine.DiffMode
 }
 
 func (ec *execCtx) report(pr *PlayResult, r Result) {

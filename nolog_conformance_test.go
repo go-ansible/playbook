@@ -67,7 +67,7 @@ func TestWithoutNoLogTheMessageIsPrinted(t *testing.T) {
 func TestUnhonouredTaskKeywordsAreNamed(t *testing.T) {
 	for _, kw := range []string{
 		"connection: local", "remote_user: x", "port: 22", "throttle: 2",
-		"diff: true", "collections: [a.b]",
+		"collections: [a.b]",
 		"timeout: 30",
 		"delegate_facts: true",
 		"debugger: never", "become_flags: -H", "become_exe: sudo",
