@@ -13,8 +13,8 @@ github.com/go-ansible/inventory v0.14.0 h1:dlmArlxXqUCcQ6iDJ2mZ0kQAG5wFCdK2oJHTY
 github.com/go-ansible/inventory v0.14.0/go.mod h1:OcadTWKJ8RQtYRmOrqKitee6d9KuXfXZdRk0I2P3kyA=
 github.com/go-ansible/modules v0.66.0 h1:L1FtHK2gewzO8TrMqqyObFMuwVHukHxaw1UFgdz3N4E=
 github.com/go-ansible/modules v0.66.0/go.mod h1:GvEACMexJ/WCdxDOyE1a342qP94Zj2ECADwzTeyjF8E=
-github.com/go-ansible/template v0.27.0 h1:Q8NOvzcRlDrX4QavSdC5sIMi07z2lKahKKbfMK1cIz8=
-github.com/go-ansible/template v0.27.0/go.mod h1:FpoXRNI4Qb5fOuoiiEyQpXb50g6Tzi0In5TYVCemVvE=
+github.com/go-ansible/template v0.28.0 h1:R0iG+CxhiW5zMWg4ef9FAq3Sca+zTl3zJWhe7lQBMFA=
+github.com/go-ansible/template v0.28.0/go.mod h1:d7Npzqj6lWrIU/72j8Ggwa1KjLQLdMz4b714dv6pbsI=
 github.com/go-ansible/vars v0.1.2 h1:ykPuxT1puCGnU4Mxa9yqcf3UeROwsOduqyOx4FOMO7U=
 github.com/go-ansible/vars v0.1.2/go.mod h1:gL9LHhbSm3zm33dZ2djIcUly8FGr1O0iqGWoW0vduk0=
 github.com/go-ansible/vault v0.7.0 h1:O17OIsXN3fSAOsi4GFioF9wGEXgdS8sfBd5z8gc+PwE=
@@ -45,8 +45,8 @@ github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd h1:TRLaZ9cD/w
 github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd/go.mod h1:6dJC0mAP4ikYIbvyc7fijjWJddQyLn8Ig3JB5CqoB9Q=
 github.com/modern-go/reflect2 v1.0.2 h1:xBagoLtFs94CBntxluKeaWgTMpvLxC4ur3nMaC9Gz0M=
 github.com/modern-go/reflect2 v1.0.2/go.mod h1:yWuevngMOJpCy52FWWMvUC8ws7m/LJsjYzDa0/r8luk=
-github.com/nikolalohinski/gonja/v2 v2.9.0 h1:QICtNWj0siM3PF5xUjVod/l+C9XnGfI+wrfSIBGKQ6o=
-github.com/nikolalohinski/gonja/v2 v2.9.0/go.mod h1:UIzXPVuOsr5h7dZ5DUbqk3/Z7oFA/NLGQGMjqT4L2aU=
+github.com/nikolalohinski/gonja/v2 v2.9.1 h1:ZDG0zYs5oR3fsqQFAlkaWiWYxPOBrCUK9k2IsRZhMa8=
+github.com/nikolalohinski/gonja/v2 v2.9.1/go.mod h1:UIzXPVuOsr5h7dZ5DUbqk3/Z7oFA/NLGQGMjqT4L2aU=
 github.com/onsi/ginkgo/v2 v2.23.4 h1:ktYTpKJAVZnDT4VjxSbiBenUjmlL/5QkBEocaWXiQus=
 github.com/onsi/ginkgo/v2 v2.23.4/go.mod h1:Bt66ApGPBFzHyR+JO10Zbt0Gsp4uWxu5mIOTusL46e8=
 github.com/onsi/gomega v1.37.0 h1:CdEG8g0S133B4OswTDC/5XPSzE1OeP29QOioj2PID2Y=
