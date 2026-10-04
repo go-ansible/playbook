@@ -64,6 +64,26 @@ type DefaultCallback struct {
 	// once per failing item — which only shows up on a loop where more
 	// than one item fails.
 	pendingIgnore bool
+
+	// Verbosity is -v's count: 0 for none, 1 for -v, and so on. At 1 or
+	// above an ok or changed line carries the whole result, which is
+	// what real's -v adds -- measured:
+	//
+	//	changed: [localhost]
+	//	changed: [localhost] => {"changed": true, "cmd": ["echo", …
+	//
+	// in the COMPACT single-line form, the same one a `fatal:` line
+	// uses, not the pretty 4-space block. A module that dumps at every
+	// verbosity (debug) keeps its pretty block; the two coexist in real
+	// at -v, and that was measured too.
+	//
+	// ⚠ What a higher level adds is NOT implemented, and is not faked
+	// by treating -vv as -v: real's -vv prefixes "task path: <file>:
+	// <line>", which needs source positions this port's parser does not
+	// keep (it unmarshals into []map[string]any), and -vvv adds
+	// connection tracing. The CLI says so in its own -h rather than
+	// letting a reader infer that nothing more exists.
+	Verbosity int
 }
 
 // NewDefaultCallback returns a DefaultCallback writing to w, with ANSI
@@ -238,10 +258,10 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 		fmt.Fprintln(c.w, c.colorize(colorCyan, fmt.Sprintf("skipping: [%s]%s", r.Host, skippedItemLabel(r))))
 	case r.Changed:
 		fmt.Fprintln(c.w, c.colorizeLines(colorYellow,
-			fmt.Sprintf("changed: [%s]%s", hostLabel(r), itemLabel(r))+c.verboseDump(r)))
+			fmt.Sprintf("changed: [%s]%s", hostLabel(r), itemLabel(r))+c.resultTail(r)))
 	default:
 		fmt.Fprintln(c.w, c.colorizeLines(colorGreen,
-			fmt.Sprintf("ok: [%s]%s", hostLabel(r), itemLabel(r))+c.verboseDump(r)))
+			fmt.Sprintf("ok: [%s]%s", hostLabel(r), itemLabel(r))+c.resultTail(r)))
 	}
 }
 
@@ -547,6 +567,26 @@ func (c *DefaultCallback) flushPendingIgnore() {
 func skippedItemLabel(r Result) string {
 	if label := itemLabel(r); label != "" {
 		return label + " "
+	}
+	return ""
+}
+
+// resultTail is what follows the "ok: [host]" / "changed: [host]" part:
+// a module's own always-on dump if it has one, else the whole result
+// when -v or higher was asked for, else nothing.
+//
+// The order matters and was measured: at -v, real shows `debug`'s pretty
+// 4-space block AND a command's compact one-line dump, so the always-on
+// dump WINS rather than being replaced by the verbose one.
+//
+// no_log is honoured by both branches -- verboseDump returns "" and
+// resultJSON censors -- which is why neither is special-cased here.
+func (c *DefaultCallback) resultTail(r Result) string {
+	if dump := c.verboseDump(r); dump != "" {
+		return dump
+	}
+	if c.Verbosity >= 1 {
+		return " => " + c.resultJSON(r)
 	}
 	return ""
 }
