@@ -2212,6 +2212,22 @@ func (ec *execCtx) connectionFor(ctx context.Context, task Task, mergedVars map[
 // named one of these — when false, the caller falls through to the
 // ordinary module dispatch.
 func (ec *execCtx) runDirective(ctx context.Context, task Task, st *hostState, args map[string]any, mergedVars map[string]any, pr *PlayResult) (result modules.Result, handled bool, err error) {
+	// A result built HERE never passes through modules.Registry.Run,
+	// so it misses the post-processing real applies to every module
+	// result alike. The `exception` key is the one that showed: real
+	// attaches it to every failing result and to no successful one,
+	// measured across assert, include_vars, add_host and group_by --
+	// all four failures carried it -- while `debug: var:` on an
+	// undefined variable, which does not fail, did not.
+	//
+	// A deferred call on the named return covers every directive at
+	// once, including ones added later, rather than each remembering.
+	defer func() {
+		if handled {
+			result = modules.AddException(result)
+		}
+	}()
+
 	switch task.Module {
 	case "add_host":
 		r, e := ec.runAddHost(args)

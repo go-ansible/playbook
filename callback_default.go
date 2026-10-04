@@ -340,6 +340,29 @@ func (c *DefaultCallback) OnStats(rr *RunResult) {
 // its own _ansible_* keys stripped. changed and msg are always present
 // there even when empty, and an unreachable result carries
 // unreachable: true.
+// hiddenFromPrintedResult are keys a result carries but the default
+// stdout callback does not print. Real's own _dump_results pops exactly
+// these three, unconditionally:
+//
+//	abridged_result.pop('exception', None)
+//	abridged_result.pop('warnings', None)
+//	abridged_result.pop('deprecations', None)
+//
+// under the comment "remove error/warning values; the stdout callback
+// should have already handled them".
+//
+// They remain in the RESULT -- r.exception registers and templates
+// fine, which is the point of carrying it at all. Measured: a failing
+// looped fail prints
+//
+//	failed: [localhost] (item=a) => {"ansible_loop_var": "item", "changed": false, "item": "a", "msg": "boom a"}
+//
+// in real, with no exception key, while r.exception is defined there.
+// Both of the loops below build printed output, so both filter.
+var hiddenFromPrintedResult = map[string]bool{
+	"exception": true, "warnings": true, "deprecations": true,
+}
+
 func (c *DefaultCallback) resultJSON(r Result) string {
 	// A failing no_log task is where a credential would otherwise be
 	// dumped in full. Real Ansible replaces everything but `changed`
@@ -366,7 +389,7 @@ func (c *DefaultCallback) resultJSON(r Result) string {
 		fields["changed"] = r.Changed
 	}
 	for k, v := range r.Extra {
-		if strings.HasPrefix(k, "_ansible_") {
+		if strings.HasPrefix(k, "_ansible_") || hiddenFromPrintedResult[k] {
 			continue
 		}
 		fields[k] = v
@@ -421,7 +444,7 @@ func (c *DefaultCallback) verboseDump(r Result) string {
 		fields["msg"] = r.Msg
 	}
 	for k, v := range r.Extra {
-		if strings.HasPrefix(k, "_ansible_") {
+		if strings.HasPrefix(k, "_ansible_") || hiddenFromPrintedResult[k] {
 			continue
 		}
 		fields[k] = v
