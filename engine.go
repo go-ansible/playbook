@@ -357,6 +357,13 @@ func (ec *execCtx) closeDelegates() {
 
 // RunPlaybook runs every play in pb in order.
 func (e *Engine) RunPlaybook(ctx context.Context, pb Playbook) (*RunResult, error) {
+	// Before ANY host is touched. Real refuses a playbook naming a
+	// module it cannot resolve and runs nothing at all; this port used
+	// to run every task up to the bad one, so a typo in task 5 applied
+	// tasks 1 through 4 for real. See UnresolvedModules.
+	if unresolved := e.UnresolvedModules(pb); len(unresolved) > 0 {
+		return nil, &UnresolvedModulesError{Unresolved: unresolved}
+	}
 	rr := &RunResult{}
 	// The stats hook fires even when a play errors out, so a recap still
 	// covers whatever did run — real Ansible prints one there too.
