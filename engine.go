@@ -2882,6 +2882,16 @@ func resultToMap(r modules.Result) map[string]any {
 	if !r.NoMsg {
 		out["msg"] = r.Msg
 	}
+	// `skipped` is emitted only when TRUE, which is how real does it:
+	// none of command/copy/file/stat/template shows a skipped key in
+	// its registered result, while a module that skips does. Measured
+	// against ansible-core 2.21.4 -- service_facts on a host with no
+	// systemd reports changed,failed,msg,SKIPPED, and this port set
+	// Result.Skipped without ever serialising it, so `r.skipped` was
+	// an undefined variable where real has true.
+	if r.Skipped {
+		out["skipped"] = true
+	}
 	for k, v := range r.Extra {
 		out[k] = v
 	}
