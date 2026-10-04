@@ -256,3 +256,109 @@ func TestNoLogSuppressesTheDiff(t *testing.T) {
 		t.Errorf("the task's outcome went missing with its diff:\n%s", censored)
 	}
 }
+
+// TestVerbosityDumpsTheResult pins real's -v: the ok/changed line
+// carries the whole result in the COMPACT single-line form -- the same
+// one a `fatal:` line uses, not the pretty 4-space block. Measured:
+//
+//	changed: [localhost]
+//	changed: [localhost] => {"changed": true, "cmd": ["echo", "hello"], …
+func TestVerbosityDumpsTheResult(t *testing.T) {
+	src := `
+- name: p
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: a command
+      command: echo hello
+`
+	quiet := runAndCaptureVerbose(t, src, 0)
+	loud := runAndCaptureVerbose(t, src, 1)
+
+	if strings.Contains(quiet, "=>") {
+		t.Errorf("without -v the line should carry nothing:\n%s", quiet)
+	}
+	if !strings.Contains(loud, `changed: [localhost] => {`) {
+		t.Errorf("-v did not dump the result:\n%s", loud)
+	}
+	// The compact form, not the pretty one: real's -v line has no
+	// newline inside the JSON.
+	for _, line := range strings.Split(loud, "\n") {
+		if strings.HasPrefix(line, "changed: [localhost] => {") && !strings.HasSuffix(line, "}") {
+			t.Errorf("the dump is not on one line, so it is the pretty form:\n%s", line)
+		}
+	}
+	if !strings.Contains(loud, `"stdout": "hello"`) {
+		t.Errorf("-v dumped something, but not the command's own result:\n%s", loud)
+	}
+}
+
+// A module that dumps at EVERY verbosity keeps its pretty block, and -v
+// does not replace it with the compact one. Measured on real: at -v, a
+// debug task still shows the 4-space block while a command beside it
+// shows the compact dump, so the two coexist.
+func TestAnAlwaysOnDumpSurvivesVerbosity(t *testing.T) {
+	loud := runAndCaptureVerbose(t, `
+- name: p
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: a debug
+      debug: {msg: hi}
+`, 1)
+	if !strings.Contains(loud, "ok: [localhost] => {\n    \"msg\": \"hi\"\n}") {
+		t.Errorf("debug's pretty block did not survive -v:\n%q", loud)
+	}
+}
+
+// ⛔ no_log must still win at -v, which is the whole point of putting
+// the verbose dump through resultJSON rather than printing the result
+// directly. Real does not reveal a no_log result at any verbosity --
+// measured up to -vvv.
+func TestNoLogWinsOverVerbosity(t *testing.T) {
+	loud := runAndCaptureVerbose(t, `
+- name: p
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: a secret command
+      command: echo SHIBBOLETH
+      no_log: true
+`, 1)
+	if strings.Contains(loud, "SHIBBOLETH") {
+		t.Errorf("-v leaked a no_log result:\n%s", loud)
+	}
+	if !strings.Contains(loud, "censored") {
+		t.Errorf("expected the censored result at -v:\n%s", loud)
+	}
+	// The control: the same task WITHOUT no_log does dump the secret at
+	// -v, so the absence above is no_log and not a missing dump.
+	visible := runAndCaptureVerbose(t, `
+- name: p
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: a command
+      command: echo SHIBBOLETH
+`, 1)
+	if !strings.Contains(visible, "SHIBBOLETH") {
+		t.Fatalf("control failed: -v did not dump the result at all, so the test above proves nothing:\n%s", visible)
+	}
+}
+
+func runAndCaptureVerbose(t *testing.T, src string, verbosity int) string {
+	t.Helper()
+	pb, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	cb := NewDefaultCallback(&buf, false)
+	cb.Verbosity = verbosity
+	e := New(localhostInventory())
+	e.Callbacks = []Callback{cb}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
+}
