@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/go-ansible/modules"
 	"github.com/go-ansible/template"
@@ -84,6 +85,11 @@ type DefaultCallback struct {
 	// connection tracing. The CLI says so in its own -h rather than
 	// letting a reader infer that nothing more exists.
 	Verbosity int
+
+	// Columns is the width banners pad out to with stars. Zero means
+	// real's own non-terminal value, 79 -- see banner. A caller writing
+	// to a terminal sets max(79, width-1), which is what real does.
+	Columns int
 }
 
 // NewDefaultCallback returns a DefaultCallback writing to w, with ANSI
@@ -152,7 +158,7 @@ func (c *DefaultCallback) OnPlayStart(play Play, hosts []string) {
 	if name != "" {
 		msg = "PLAY [" + name + "]"
 	}
-	fmt.Fprintf(c.w, "\n%s\n", msg)
+	fmt.Fprintf(c.w, "\n%s\n", c.banner(msg))
 
 	// Real Ansible says so rather than printing nothing, so a mistyped
 	// host pattern is distinguishable from a play that genuinely had
@@ -300,7 +306,7 @@ func (c *DefaultCallback) taskBanner(r Result) {
 	}
 	if key != c.lastTask {
 		c.flushPendingIgnore()
-		fmt.Fprintf(c.w, "\n%s [%s]\n", kind, banner)
+		fmt.Fprintf(c.w, "\n%s\n", c.banner(kind+" ["+banner+"]"))
 		c.lastTask = key
 	}
 }
@@ -327,7 +333,7 @@ func (c *DefaultCallback) OnStats(rr *RunResult) {
 	c.flushPendingIgnore()
 
 	fmt.Fprintln(c.w)
-	fmt.Fprintln(c.w, "PLAY RECAP")
+	fmt.Fprintln(c.w, c.banner("PLAY RECAP"))
 
 	summary := rr.Summary()
 	hosts := make([]string, 0, len(summary))
@@ -589,4 +595,47 @@ func (c *DefaultCallback) resultTail(r Result) string {
 		return " => " + c.resultJSON(r)
 	}
 	return ""
+}
+
+// defaultBannerColumns is real Ansible's floor. Display._set_column_width
+// does
+//
+//	tty_size = ioctl(1, TIOCGWINSZ)[1] if os.isatty(1) else 0
+//	self.columns = max(79, tty_size - 1)
+//
+// so a run whose stdout is NOT a terminal -- every CI job, every
+// redirect, every test -- gets exactly 79, and every banner line comes
+// out 80 characters long. Measured: `ansible-playbook … | awk
+// '{print length($0)}'` gives 80, and COLUMNS=200 does NOT change it,
+// because real reads the ioctl rather than the environment.
+const defaultBannerColumns = 79
+
+// banner is real's Display.banner: the message, one space, then stars
+// out to the column width, never fewer than three.
+//
+//	msg = msg.strip()
+//	star_len = self.columns - get_text_width(msg)
+//	if star_len <= 3: star_len = 3
+//	display("\n%s %s" % (msg, "*" * star_len))
+//
+// This port printed the message and no stars at all, which made every
+// transcript differ from real's on its most-seen line -- the one a
+// reader looks at first.
+//
+// ⚠ Width is counted in RUNES, where real counts display width
+// (get_text_width, which consults wcwidth). The two differ for a
+// double-width or combining character in a play or task NAME; ASCII
+// names, which is what the conformance corpus has, agree exactly. Named
+// rather than silently approximated.
+func (c *DefaultCallback) banner(msg string) string {
+	cols := c.Columns
+	if cols <= 0 {
+		cols = defaultBannerColumns
+	}
+	msg = strings.TrimSpace(msg)
+	stars := cols - utf8.RuneCountInString(msg)
+	if stars <= 3 {
+		stars = 3
+	}
+	return msg + " " + strings.Repeat("*", stars)
 }

@@ -239,14 +239,14 @@ func TestConformanceDebugAndBanners(t *testing.T) {
 	got := buf.String()
 	for _, want := range []string{
 		// An unnamed play is named after its hosts pattern.
-		"\nPLAY [all]\n",
+		"\n" + bannerFor("PLAY [all]") + "\n",
 		// A debug task dumps its result, pretty-printed at four spaces.
-		"\nTASK [debug msg]\nok: [localhost] => {\n    \"msg\": \"hello\"\n}\n",
+		"\n" + bannerFor("TASK [debug msg]") + "\nok: [localhost] => {\n    \"msg\": \"hello\"\n}\n",
 		// var: reports the variable's VALUE, keyed by its own name, and
 		// sets no msg.
-		"\nTASK [debug var]\nok: [localhost] => {\n    \"d\": {\n        \"a\": 1\n    }\n}\n",
+		"\n" + bannerFor("TASK [debug var]") + "\nok: [localhost] => {\n    \"d\": {\n        \"a\": 1\n    }\n}\n",
 		// An unnamed task banners under its module.
-		"\nTASK [debug]\n",
+		"\n" + bannerFor("TASK [debug]") + "\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output missing %q\n--- got ---\n%s", want, got)
