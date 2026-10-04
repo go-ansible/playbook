@@ -70,6 +70,14 @@ func DefaultConnect(ctx context.Context, hostName string, hostVars map[string]an
 		return local, nil
 	}
 
+	// WinRM, for a Windows target. The transport under this package has
+	// spoken WS-Management for a while; nothing here could ask for it,
+	// so `ansible_connection: winrm` fell through to the SSH branch and
+	// tried to open an SSH session against a Windows host.
+	if explicitConnType == "winrm" {
+		return dialWinRM(ctx, hostName, hostVars)
+	}
+
 	cfg := remoteexec.SSHConfig{
 		Host:           strVar(hostVars, "ansible_host", hostName),
 		Port:           intVar(hostVars, "ansible_port", 22),
