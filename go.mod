@@ -9,7 +9,7 @@ require (
 	github.com/go-ansible/template v0.30.0
 	github.com/go-ansible/vars v0.1.2
 	github.com/go-ansible/vault v0.7.0
-	github.com/go-remoteexec/transport v0.2.0
+	github.com/go-remoteexec/transport v0.2.1
 )
 
 require (
