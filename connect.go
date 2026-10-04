@@ -376,5 +376,50 @@ func becomeConfigFor(play Play, task Task, hostVars map[string]any) (cfg remotee
 		Method:   method,
 		User:     user,
 		Password: strVar(hostVars, "ansible_become_password", strVar(hostVars, "ansible_become_pass", "")),
+		Exe:      becomeOption(hostVars, method, "exe", task.BecomeExe, play.BecomeExe),
+		Flags:    becomeOption(hostVars, method, "flags", task.BecomeFlags, play.BecomeFlags),
 	}, true
+}
+
+// becomeOption resolves become_exe or become_flags across the five
+// sources real Ansible reads for them.
+//
+// The ORDER is measured against ansible-core 2.21.4 rather than assumed,
+// because the counter-intuitive rung is near the top: the host VAR beats
+// the playbook KEYWORD. With `become_flags: "-H -S -n -K1"` on the play
+// and ansible_become_flags set to "-H -S -n -K2", real emits -K2. The
+// same holds for become_exe, and it is the same shape becomeConfigFor
+// already documents for become/become_user.
+//
+//	host var > task keyword > play keyword > environment > ansible.cfg
+//
+// Each rung has two spellings: a generic one and one named after the
+// method -- ansible_become_flags and ansible_sudo_flags for sudo,
+// ansible_su_flags for su, and so on, which is how each become plugin
+// declares its own options. The generic spelling is checked first.
+//
+// An empty result means "say nothing", and the transport then applies
+// the method's own documented default.
+func becomeOption(hostVars map[string]any, method remoteexec.BecomeMethod, what, taskKeyword, playKeyword string) string {
+	for _, name := range []string{"ansible_become_" + what, "ansible_" + string(method) + "_" + what} {
+		if v := strVar(hostVars, name, ""); v != "" {
+			return v
+		}
+	}
+	if taskKeyword != "" {
+		return taskKeyword
+	}
+	if playKeyword != "" {
+		return playKeyword
+	}
+	for _, name := range []string{"ANSIBLE_BECOME_" + strings.ToUpper(what), "ANSIBLE_" + strings.ToUpper(string(method)) + "_" + strings.ToUpper(what)} {
+		if v := os.Getenv(name); v != "" {
+			return v
+		}
+	}
+	// Real puts these under [privilege_escalation], not [defaults].
+	if v, ok := configFileValueIn("privilege_escalation", "become_"+what); ok && v != "" {
+		return v
+	}
+	return ""
 }

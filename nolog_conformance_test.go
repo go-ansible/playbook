@@ -66,7 +66,13 @@ func TestWithoutNoLogTheMessageIsPrinted(t *testing.T) {
 // the playbook is malformed when it is this port that is incomplete.
 func TestUnhonouredTaskKeywordsAreNamed(t *testing.T) {
 	// timeout: and throttle: left this list when they became
-	// HONOURED -- see TestTaskTimeout and TestThrottleLimitsOneTask.
+	// HONOURED -- see TestTaskTimeout and TestThrottleLimitsOneTask --
+	// and become_flags:/become_exe: left it for the same reason, once
+	// go-remoteexec/transport v0.2.0 gave BecomeConfig the Exe and
+	// Flags fields there was nowhere to put them before. See
+	// TestBecomeKeywordsNoLongerRefused, which also checks they did not
+	// fall back to reading as a module name on the way out.
+	//
 	// The rest stay refused on purpose: silently accepting
 	// `connection: local` would mean running something other than what
 	// the playbook says, which is worse than saying no.
@@ -74,7 +80,7 @@ func TestUnhonouredTaskKeywordsAreNamed(t *testing.T) {
 		"connection: local", "remote_user: x", "port: 22",
 		"collections: [a.b]",
 		"delegate_facts: true",
-		"debugger: never", "become_flags: -H", "become_exe: sudo",
+		"debugger: never",
 	} {
 		t.Run(kw, func(t *testing.T) {
 			_, err := Parse([]byte("- {name: p, hosts: all, gather_facts: false, tasks: [{name: t, debug: {msg: x}, " + kw + "}]}\n"))

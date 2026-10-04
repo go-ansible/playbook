@@ -30,6 +30,8 @@ type Play struct {
 	Become       bool
 	BecomeUser   string
 	BecomeMethod string
+	BecomeExe    string // become_exe: the escalation program to run
+	BecomeFlags  string // become_flags: REPLACES the method's own default flags
 	Vars         map[string]any
 	VarsFiles    []string // paths, resolved relative to the playbook's directory
 	Tasks        []Task
@@ -224,6 +226,8 @@ type Task struct {
 	Tags        []string
 	Become      *bool // nil means "inherit the play's setting"
 	BecomeUser  string
+	BecomeExe   string
+	BecomeFlags string
 	Notify      []string
 
 	// Listen are the notify TOPICS this handler answers to, on top of
@@ -478,6 +482,8 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 		Become:            boolDefault(m["become"], false),
 		BecomeUser:        strDefault(m["become_user"], "root"),
 		BecomeMethod:      strDefault(m["become_method"], "sudo"),
+		BecomeExe:         str(m["become_exe"]),
+		BecomeFlags:       str(m["become_flags"]),
 		Vars:              toMap(m["vars"]),
 		Tags:              toStringList(m["tags"]),
 		Serial:            toSerialList(m["serial"]),
@@ -774,7 +780,7 @@ var taskReservedKeys = map[string]bool{
 	"name": true, "when": true, "loop": true, "loop_control": true,
 	"register": true, "ignore_errors": true, "changed_when": true,
 	"failed_when": true, "tags": true, "become": true, "become_user": true,
-	"become_method": true, "notify": true, "listen": true, "action": true, "args": true, "local_action": true, "vars": true, "delegate_to": true,
+	"become_method": true, "become_exe": true, "become_flags": true, "notify": true, "listen": true, "action": true, "args": true, "local_action": true, "vars": true, "delegate_to": true,
 	"block": true, "rescue": true, "always": true, "with_items": true,
 	"until": true, "retries": true, "delay": true, "run_once": true,
 	"async": true, "poll": true,
@@ -812,8 +818,6 @@ func optionalBool(v any) *bool {
 // this list.
 var unhonouredTaskKeys = map[string]string{
 	"async_val":      "use async:",
-	"become_exe":     "",
-	"become_flags":   "",
 	"collections":    "fully-qualified module names resolve without it",
 	"connection":     "set it on the PLAY, which this port honours, or ansible_connection on the host",
 	"debugger":       "",
@@ -951,6 +955,8 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 		FailedWhen:        str(m["failed_when"]),
 		Tags:              toStringList(m["tags"]),
 		BecomeUser:        str(m["become_user"]),
+		BecomeExe:         str(m["become_exe"]),
+		BecomeFlags:       str(m["become_flags"]),
 		Notify:            toStringList(m["notify"]),
 		Listen:            toStringList(m["listen"]),
 		Vars:              toMap(m["vars"]),
