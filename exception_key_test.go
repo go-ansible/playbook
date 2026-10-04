@@ -70,3 +70,30 @@ func TestEngineDirectiveFailuresCarryException(t *testing.T) {
 		t.Error("a successful directive result carries an exception key")
 	}
 }
+
+// `skipped` is emitted only when TRUE, which is how real does it: none
+// of command/copy/file/stat/template shows a skipped key in its
+// registered result, while a module that skips does.
+//
+// Measured against ansible-core 2.21.4 -- service_facts on a host with
+// no systemd reports changed,failed,msg,skipped. This port set
+// Result.Skipped and never serialised it, so `r.skipped` was an
+// undefined variable where real has true, and a `when: r.skipped`
+// could not be written at all.
+func TestSkippedIsSerialisedOnlyWhenTrue(t *testing.T) {
+	skipped := resultToMap(modules.Skipped("nothing to do"))
+	if v, ok := skipped["skipped"]; !ok || v != true {
+		t.Errorf("a skipped result has skipped = %v (present: %v), want true", v, ok)
+	}
+
+	for _, r := range []modules.Result{
+		modules.Ok("fine"),
+		modules.Changed("done"),
+		modules.Fail("no"),
+	} {
+		m := resultToMap(r)
+		if _, present := m["skipped"]; present {
+			t.Errorf("a non-skipped result carries a skipped key: %v", m)
+		}
+	}
+}
