@@ -73,6 +73,15 @@ func fileExists(path string) bool {
 // testable against a real file with t.Chdir/t.Setenv rather than
 // needing a way to reset a package-level cache between tests.
 func configFileValue(key string) (string, bool) {
+	return configFileValueIn("defaults", key)
+}
+
+// configFileValueIn is configFileValue for a section other than
+// [defaults]. Real Ansible puts the become settings under
+// [privilege_escalation], so reading only [defaults] would have missed
+// them -- and the scanner below already tracked the section it was in,
+// it just compared against one hardcoded name.
+func configFileValueIn(wantSection, key string) (string, bool) {
 	path := findConfigFile()
 	if path == "" {
 		return "", false
@@ -94,7 +103,7 @@ func configFileValue(key string) (string, bool) {
 			section = strings.TrimSpace(line[1 : len(line)-1])
 			continue
 		}
-		if section != "defaults" {
+		if section != wantSection {
 			continue
 		}
 		k, v, ok := strings.Cut(line, "=")
