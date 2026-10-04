@@ -1,6 +1,10 @@
 package playbook
 
 import (
+	"bytes"
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -190,5 +194,65 @@ func TestHonouredKeywordsParseAsKeywords(t *testing.T) {
 	}
 	if task.Throttle != 2 {
 		t.Errorf("Throttle = %d, want 2", task.Throttle)
+	}
+}
+
+// TestNoLogSuppressesTheDiff is the path TestNoLogCensorsTheResult
+// missed: it covers ok, changed, skipped and failed, and --diff is a
+// FIFTH place a result reaches the screen. `copy: {content: <secret>}`
+// with no_log: true printed the secret in full under --diff, which is
+// the one flag a reader adds when they want to see what changed.
+//
+// Real's mechanism is worth knowing, because it explains why its own
+// v2_on_file_diff has no no_log branch: as_result_dict() replaces a
+// no_log result with the keys in its PRESERVE set (_ansible_no_log,
+// attempts, changed, deprecations, exception, retries, warnings) plus
+// `censored`. `diff` is not among them, so there is nothing left to
+// print. Measured against ansible-core 2.21.4: the no_log task prints
+// no diff, and the same task with no_log removed prints the whole one,
+// secret included.
+func TestNoLogSuppressesTheDiff(t *testing.T) {
+	const secret = "SUPER-SECRET-VALUE-9f3a"
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+
+	run := func(noLog bool) string {
+		if err := os.WriteFile(target, []byte("OLD CONTENT\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		src := "- name: p\n  hosts: all\n  gather_facts: false\n  tasks:\n" +
+			"    - name: t\n      copy: {content: \"" + secret + "\\n\", dest: " + target + "}\n"
+		if noLog {
+			src += "      no_log: true\n"
+		}
+		pb, err := Parse([]byte(src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		e := New(localhostInventory())
+		e.DiffMode = true
+		e.Callbacks = []Callback{NewDefaultCallback(&buf, false)}
+		if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+
+	// The control runs FIRST and is fatal: without it, "the secret is
+	// absent" could just mean the diff never rendered at all, and the
+	// assertion below would pass on a port with no --diff support.
+	visible := run(false)
+	if !strings.Contains(visible, secret) {
+		t.Fatalf("control failed: --diff did not render the secret without no_log, so its absence below proves nothing:\n%s", visible)
+	}
+
+	censored := run(true)
+	if strings.Contains(censored, secret) {
+		t.Errorf("no_log leaked the secret through --diff:\n%s", censored)
+	}
+	// The outcome is still reported; only the contents are hidden.
+	if !strings.Contains(censored, "changed: [localhost]") {
+		t.Errorf("the task's outcome went missing with its diff:\n%s", censored)
 	}
 }

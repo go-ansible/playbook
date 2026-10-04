@@ -165,8 +165,28 @@ func (c *DefaultCallback) OnTaskResult(r Result) {
 	// that says what happened, so the reader sees the change and then
 	// its verdict. Measured from a real --diff --check run, which also
 	// showed the blank line renderDiff leaves after each one.
-	for _, d := range r.Diffs {
-		fmt.Fprint(c.w, renderDiff(d, c.colorize))
+	// ⛔ SECURITY. no_log must suppress the diff, and this loop did not
+	// check it -- so `copy: {content: <secret>}` with no_log: true
+	// printed the secret under --diff, which is the one flag a reader
+	// adds when they want to see what changed.
+	//
+	// Real's mechanism is not a check here: as_result_dict() REPLACES a
+	// no_log result with the keys in its own PRESERVE set
+	// (_ansible_no_log, attempts, changed, deprecations, exception,
+	// retries, warnings) plus `censored`, and `diff` is not among them.
+	// So by the time v2_on_file_diff runs there is no diff key to
+	// print, and that function needs no no_log branch of its own. Our
+	// Result is a struct rather than a dict, so the equivalent is to
+	// not print it.
+	//
+	// Measured both ways before fixing: real prints nothing for the
+	// no_log task, and prints the full diff -- secret included -- for
+	// the same task with no_log removed. The second half is what makes
+	// the first half mean something.
+	if !r.NoLog {
+		for _, d := range r.Diffs {
+			fmt.Fprint(c.w, renderDiff(d, c.colorize))
+		}
 	}
 
 	switch {
