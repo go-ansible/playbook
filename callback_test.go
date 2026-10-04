@@ -81,14 +81,14 @@ func TestDefaultCallbackOutput(t *testing.T) {
 		{Host: "web3", Changed: true},
 	}}}})
 
-	want := "\nPLAY [deploy]\n" +
-		"\nTASK [install]\n" +
+	want := "\n" + bannerFor("PLAY [deploy]") + "\n" +
+		"\n" + bannerFor("TASK [install]") + "\n" +
 		"ok: [web1]\n" +
 		"changed: [web2]\n" +
-		"\nTASK [configure]\n" +
+		"\n" + bannerFor("TASK [configure]") + "\n" +
 		"skipping: [web1]\n" +
 		"fatal: [web2]: FAILED! => {\"changed\": false, \"msg\": \"boom\"}\n" +
-		"\nPLAY RECAP\n" +
+		"\n" + bannerFor("PLAY RECAP") + "\n" +
 		"web1                       : ok=1    changed=0    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0   \n" +
 		"web2                       : ok=1    changed=1    unreachable=0    failed=1    skipped=0    rescued=0    ignored=0   \n" +
 		"web3                       : ok=1    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   \n" +
@@ -103,10 +103,12 @@ func TestDefaultCallbackOutput(t *testing.T) {
 
 func TestDefaultCallbackUnnamedPlay(t *testing.T) {
 	var buf bytes.Buffer
-	// Real Ansible prints a bare "PLAY" banner for a play with no name.
+	// Real Ansible prints a bare "PLAY" banner for a play with no name
+	// -- and pads it with stars like any other, since Display.banner is
+	// what prints all of them.
 	NewDefaultCallback(&buf, false).OnPlayStart(Play{Name: "  "}, []string{"h1"})
-	if got := buf.String(); got != "\nPLAY\n" {
-		t.Errorf("unnamed play banner = %q, want %q", got, "\nPLAY\n")
+	if want := "\n" + bannerFor("PLAY") + "\n"; buf.String() != want {
+		t.Errorf("unnamed play banner = %q, want %q", buf.String(), want)
 	}
 }
 
@@ -119,7 +121,7 @@ func TestDefaultCallbackColor(t *testing.T) {
 	// against ansible-core 2.21.4, which colours results and the recap
 	// counts but leaves PLAY, TASK and PLAY RECAP plain. This asserted
 	// a cyan banner, which was this port's own invention.
-	want := "\nTASK [install]\n\033[0;33mchanged: [web1]\033[0m\n"
+	want := "\n" + bannerFor("TASK [install]") + "\n\033[0;33mchanged: [web1]\033[0m\n"
 	if got := buf.String(); got != want {
 		t.Errorf("colored output = %q, want %q", got, want)
 	}
@@ -699,7 +701,7 @@ func TestDefaultCallbackRecapColors(t *testing.T) {
 				Plays: []PlayResult{{Results: tc.results, Rescued: tc.rescued}},
 			})
 			got := buf.String()
-			_, line, ok := strings.Cut(got, "PLAY RECAP\n")
+			_, line, ok := strings.Cut(got, bannerFor("PLAY RECAP")+"\n")
 			if !ok {
 				t.Fatalf("no recap banner in %q", got)
 			}
@@ -826,7 +828,7 @@ func TestMetaBannersWithoutAResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "\nTASK [nothing]\n\nTASK [real work]\n"; !strings.Contains(buf.String(), want) {
+	if want := "\n" + bannerFor("TASK [nothing]") + "\n\n" + bannerFor("TASK [real work]") + "\n"; !strings.Contains(buf.String(), want) {
 		t.Errorf("output =\n%q\nwant it to contain %q", buf.String(), want)
 	}
 	if s := rr.Summary()["localhost"]; s == nil || s.Ok != 1 {
@@ -1727,4 +1729,79 @@ func TestParseNumbersEveryTaskDistinctly(t *testing.T) {
 	if len(seen) != 7 {
 		t.Errorf("numbered %d tasks, want 7: %v", len(seen), seen)
 	}
+}
+
+// TestBannerMatchesRealsExactLine pins the two lines below VERBATIM from
+// an ansible-core 2.21.4 run whose stdout was a pipe. They are spelled
+// out rather than computed because every other banner assertion in this
+// package uses a helper that mirrors the production formula, and a
+// helper cannot catch a wrong formula. This one can.
+//
+//	80 |PLAY [all] ****…|
+//	80 |TASK [debug msg] ****…|
+//
+// 80 characters: real's columns is max(79, tty_size-1), and a pipe makes
+// tty_size 0, so it is 79 plus the single space before the stars.
+// COLUMNS=200 does not change it -- real reads the ioctl, not the
+// environment -- which was measured too.
+func TestBannerMatchesRealsExactLine(t *testing.T) {
+	const (
+		realPlay = "PLAY [all] *********************************************************************"
+		realTask = "TASK [debug msg] ***************************************************************"
+	)
+	// The capture itself, checked: a transposed star run would make the
+	// assertions below agree with each other and with nothing real.
+	for _, l := range []string{realPlay, realTask} {
+		if len(l) != 80 {
+			t.Fatalf("the pinned line is %d characters, not 80, so it is not what real printed: %q", len(l), l)
+		}
+	}
+
+	pb, err := Parse([]byte(`
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: debug msg
+      debug: {msg: hello}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	e := New(localhostInventory())
+	e.Callbacks = []Callback{NewDefaultCallback(&buf, false)}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	for _, want := range []string{"\n" + realPlay + "\n", "\n" + realTask + "\n"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing real's own banner line:\nwant %q\n--- got ---\n%s", want, got)
+		}
+	}
+}
+
+// A long name leaves real's three-star floor rather than a negative run.
+// Measured on a name longer than the width.
+func TestBannerFloorsAtThreeStars(t *testing.T) {
+	c := NewDefaultCallback(&bytes.Buffer{}, false)
+	long := strings.Repeat("n", 120)
+	got := c.banner("TASK [" + long + "]")
+	if !strings.HasSuffix(got, " ***") {
+		t.Errorf("want exactly three stars after a space, got %q", got[len(got)-10:])
+	}
+	if strings.HasSuffix(got, "****") {
+		t.Errorf("more than three stars on an over-long name: %q", got[len(got)-10:])
+	}
+}
+
+// bannerFor is the expectation helper the other tests in this package
+// use. It deliberately does NOT call c.banner: a helper that calls the
+// code under test asserts only that the code equals itself.
+func bannerFor(msg string) string {
+	stars := 79 - len([]rune(msg))
+	if stars <= 3 {
+		stars = 3
+	}
+	return msg + " " + strings.Repeat("*", stars)
 }
