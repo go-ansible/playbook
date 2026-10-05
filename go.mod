@@ -1,6 +1,6 @@
 module github.com/go-ansible/playbook
 
-go 1.26.4
+go 1.27.1
 
 require (
 	github.com/go-ansible/facts v0.16.0
