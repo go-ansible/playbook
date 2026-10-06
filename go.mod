@@ -3,13 +3,13 @@ module github.com/go-ansible/playbook
 go 1.27.1
 
 require (
-	github.com/go-ansible/facts v0.16.0
-	github.com/go-ansible/inventory v0.18.0
-	github.com/go-ansible/modules v0.80.1
-	github.com/go-ansible/template v0.31.0
-	github.com/go-ansible/vars v0.1.2
-	github.com/go-ansible/vault v0.7.0
-	github.com/go-remoteexec/transport v0.4.0
+	github.com/go-ansible/facts v0.18.0
+	github.com/go-ansible/inventory v0.19.0
+	github.com/go-ansible/modules v0.82.0
+	github.com/go-ansible/template v0.32.0
+	github.com/go-ansible/vars v0.2.0
+	github.com/go-ansible/vault v0.9.0
+	github.com/go-remoteexec/transport v0.5.0
 )
 
 require (
