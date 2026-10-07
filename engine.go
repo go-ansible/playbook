@@ -235,6 +235,18 @@ type hostState struct {
 	conn remoteexec.Connection
 	vc   *vars.Context
 
+	// connSig is the connectionSignature st.conn was built from, and
+	// conns holds every connection this host has opened, keyed by
+	// signature, so switching back and forth does not dial twice.
+	//
+	// Real Ansible connects per TASK -- the comment below has said so
+	// for a long time, while this connection was built once at play
+	// start and never reconsidered. A task that set ansible_connection
+	// was VISIBLE in the variables and changed nothing, which is the
+	// worst shape a divergence can take.
+	connSig string
+	conns   map[string]remoteexec.Connection
+
 	// connErr is why this host has no connection, kept rather than
 	// reported at connect time. Real Ansible connects per TASK, so an
 	// unreachable host reports UNREACHABLE under the first task that
@@ -692,7 +704,13 @@ func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Hos
 	defer func() {
 		ec.closeDelegates()
 		for _, st := range ec.states {
-			if st.conn != nil {
+			// Every connection this host opened, not only the one it
+			// ended on: a play that switches connection mid-way used to
+			// leak the ones it moved away from.
+			for _, c := range st.conns {
+				c.Close()
+			}
+			if len(st.conns) == 0 && st.conn != nil {
 				st.conn.Close()
 			}
 		}
@@ -854,6 +872,8 @@ func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *Pla
 				return
 			}
 			st.conn = conn
+			st.connSig = ec.connSignature(e.resolved(st.vc.Merged()))
+			st.conns = map[string]remoteexec.Connection{st.connSig: conn}
 			if !play.GatherFacts {
 				return
 			}
@@ -1813,6 +1833,13 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				conn, dname, cerr := ec.connectionFor(ctx, task, mergedVars, st)
 				delegate = dname
 				if cerr != nil {
+					var unreachable *unreachableError
+					if errors.As(cerr, &unreachable) {
+						if ec.reportUnreachable(pr, st, task, unreachable.err) {
+							return true
+						}
+						return false
+					}
 					ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: cerr.Error(), Delegate: delegate})
 					anyFailed = true
 					aborted = true
@@ -2182,6 +2209,37 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 // report WHERE the task ran; empty when the task ran on its own host.
 func (ec *execCtx) connectionFor(ctx context.Context, task Task, mergedVars map[string]any, st *hostState) (remoteexec.Connection, string, error) {
 	conn := st.conn
+	// A task whose variables name a different connection gets one.
+	// Measured against ansible-core 2.21.4: after
+	// `set_fact: {ansible_connection: ssh}` the NEXT task really does
+	// go over SSH -- real reported UNREACHABLE where this port kept
+	// running locally and said `ran=still-here`.
+	// A task whose variables name a different connection gets one.
+	// Measured against ansible-core 2.21.4: after
+	// `set_fact: {ansible_connection: ssh}` the NEXT task really does go
+	// over SSH -- real reported UNREACHABLE where this port kept running
+	// locally and said `ran=still-here`.
+	//
+	// connectionlessModules is the same list the unreachable check above
+	// uses, and it is what keeps a `debug` between the change and the
+	// next real task from dialling: real opens nothing until a task
+	// reaches for a connection, so its debug still reports ok. Dialling
+	// for every task instead gave ok=1 against real's ok=2.
+	if conn != nil && !connectionlessModules[modules.NormalizeName(task.Module)] {
+		if sig := ec.connSignature(mergedVars); sig != st.connSig {
+			next, err := ec.reconnect(ctx, st, sig, mergedVars)
+			if err != nil {
+				// A connection that cannot be made is UNREACHABLE, not a
+				// failed task -- real counts it in the recap's own
+				// column. Recording it the way the initial connect does
+				// lets the existing machinery say so, including for the
+				// tasks that follow.
+				st.conn, st.connErr = nil, err
+				return nil, "", &unreachableError{err}
+			}
+			conn = next
+		}
+	}
 	delegate := ""
 	if task.DelegateTo != "" {
 		delegateName, err := ec.engine.Template.Render(task.DelegateTo, mergedVars)
@@ -3747,3 +3805,58 @@ func extendedLoopVars(items []any, index int, allItems *bool) map[string]any {
 	}
 	return out
 }
+
+// reconnect gives st a connection matching sig, reusing one it already
+// opened under that signature. The host's current connection becomes the
+// new one, so a later task with the same variables needs no lookup.
+//
+// A failure is returned rather than swallowed: a task that asked for a
+// different connection and silently got the old one is the defect this
+// exists to fix, and would be indistinguishable from success.
+func (ec *execCtx) reconnect(ctx context.Context, st *hostState, sig string, vars map[string]any) (remoteexec.Connection, error) {
+	if c, ok := st.conns[sig]; ok {
+		st.conn, st.connSig = c, sig
+		return c, nil
+	}
+	// Lazy: a task that does not touch the connection must not dial it.
+	// Real opens nothing until a task reaches for one, which is why a
+	// `debug` between a connection change and the next real task still
+	// reports ok there. Dialing here instead made that debug fail.
+	//
+	// DefaultConnect already says "connecting to <host>" in its own
+	// error, so this one does not say it again -- the first version
+	// produced "connecting to localhost: connecting to localhost: ...".
+	// DefaultConnect already says "connecting to <host>" in its own
+	// error, so this does not say it again -- the first version produced
+	// "connecting to localhost: connecting to localhost: ...".
+	c, err := ec.engine.Connect(ctx, st.name, withPlayConnection(ec.play, vars))
+	if err != nil {
+		return nil, err
+	}
+	if st.conns == nil {
+		st.conns = map[string]remoteexec.Connection{}
+	}
+	st.conns[sig] = c
+	st.conn, st.connSig = c, sig
+	return c, nil
+}
+
+// connSignature is the signature of the connection THIS play would build
+// from vars. Both the initial connect and the per-task check go through
+// it, because they must agree: withPlayConnection injects the play's
+// connection:/remote_user:/port: keywords, and a signature computed
+// without them differs from one computed with them for every task of
+// such a play -- which would have reconnected on every single task
+// instead of never.
+func (ec *execCtx) connSignature(vars map[string]any) string {
+	return connectionSignature(withPlayConnection(ec.play, vars))
+}
+
+// unreachableError marks a failure to CONNECT, as opposed to a task that
+// ran and failed. Real Ansible counts the two in different columns of
+// the recap, and a caller distinguishing "could not reach it" from "it
+// ran and failed" -- a retry loop, a deployment gate -- needs that.
+type unreachableError struct{ err error }
+
+func (e *unreachableError) Error() string { return e.err.Error() }
+func (e *unreachableError) Unwrap() error { return e.err }
