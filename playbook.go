@@ -523,8 +523,13 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 		return p, fmt.Errorf("play %q: module_defaults: %w", p.Name, mdErr)
 	}
 	p.Strategy = strDefault(m["strategy"], "linear")
-	if p.Strategy != "linear" && p.Strategy != "free" {
-		return p, fmt.Errorf("play %q: strategy %q not supported (only linear, free)", p.Name, p.Strategy)
+	// `debug` is real's linear strategy with its interactive debugger
+	// switched on, and this port has no debugger, so running it as
+	// linear would silently drop the only thing it asks for. It stays
+	// refused by name for that reason, not because the scheduling is
+	// hard.
+	if p.Strategy != "linear" && p.Strategy != "free" && p.Strategy != "host_pinned" {
+		return p, fmt.Errorf("play %q: strategy %q not supported (only linear, free, host_pinned)", p.Name, p.Strategy)
 	}
 
 	var roleHandlers []Task
