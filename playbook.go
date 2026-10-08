@@ -876,14 +876,19 @@ func optionalBool(v any) *bool {
 // this list.
 var unhonouredTaskKeys = map[string]string{
 	"async_val": "use async:",
-	// delegate_facts needs facts to be written to ANOTHER host's
-	// variables and read back. `hostvars` here is built once from the
-	// inventory at play start -- a snapshot, not a live store -- so a
-	// fact written to another host would be invisible to every reader of
-	// it, including that host's own next task. Refused rather than
-	// half-built: the half that would work (a delegate inside the play)
-	// looks identical to the half that would not (a delegate outside it).
-	"delegate_facts": "facts cannot yet be written to another host: hostvars is a snapshot of the inventory",
+	// delegate_facts needs facts to be WRITTEN to another host's
+	// variables. Reading them back is no longer the problem -- hostvars
+	// became live in v0.131.0, and this hint said "hostvars is a
+	// snapshot" until that shipped, which is how fast a refusal's stated
+	// reason can go stale.
+	//
+	// What remains is the write. vars.Context is not synchronised and a
+	// host's own goroutine is the only thing that touches it; writing to
+	// another host's Context from this one is a data race, and the
+	// snapshot mechanism deliberately only ever publishes, never
+	// accepts. It needs a safe hand-off -- a queue applied at a barrier
+	// -- and under `free` there is no barrier to apply it at.
+	"delegate_facts": "facts cannot yet be written to another host: its variables are owned by its own goroutine",
 	"loop_with":      "use loop: or with_items:",
 }
 
