@@ -146,3 +146,95 @@ func TestASnapshotDoesNotCarryHostvars(t *testing.T) {
 		t.Errorf("hostvars['h2']['hostvars'] is defined; the snapshot nests:\n%s", out)
 	}
 }
+
+// TestGroupsFollowsAddHost: add_host and group_by CHANGE the inventory
+// mid-play, and `groups` was built from it once at play start -- so a
+// group created by add_host did not exist for the rest of the play.
+// Measured against ansible-core 2.21.4:
+//
+//	groups['latecomers']  real: ['h2']  ours: <MISSING>
+func TestGroupsFollowsAddHost(t *testing.T) {
+	e := New(twoLocalHosts(t))
+	var buf strings.Builder
+	e.Callbacks = []Callback{NewDefaultCallback(&buf, false)}
+	pb, err := Parse([]byte(`
+- name: p
+  hosts: h1
+  gather_facts: false
+  tasks:
+    - add_host: {name: h2, groups: latecomers}
+    - debug: {msg: "GOT={{ groups['latecomers'] | default('<MISSING>') }}"}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "GOT=['h2']") {
+		t.Errorf("groups did not follow add_host:\n%s", buf.String())
+	}
+}
+
+// ...and hostvars covers a host that did not exist when the play began.
+func TestHostvarsCoversAnAddedHost(t *testing.T) {
+	e := New(twoLocalHosts(t))
+	var buf strings.Builder
+	e.Callbacks = []Callback{NewDefaultCallback(&buf, false)}
+	pb, err := Parse([]byte(`
+- name: p
+  hosts: h1
+  gather_facts: false
+  tasks:
+    - add_host: {name: newbie, ansible_connection: local, some_var: hello}
+    - debug: {msg: "GOT={{ hostvars['newbie']['some_var'] | default('<MISSING>') }}"}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "GOT=hello") {
+		t.Errorf("hostvars did not cover a host added by add_host:\n%s", buf.String())
+	}
+}
+
+// The rebuild is skipped while the inventory is unchanged, which is what
+// keeps a playbook that never calls add_host -- almost all of them --
+// from paying O(hosts x groups) per task per host.
+//
+// Asserting the CACHE rather than the output, because the output is
+// identical either way: that is precisely why a broken cache would go
+// unnoticed.
+func TestTheInventoryViewIsCachedUntilItChanges(t *testing.T) {
+	e := New(twoLocalHosts(t))
+	ec := &execCtx{engine: e}
+
+	g1, h1 := ec.inventoryView()
+	g2, h2 := ec.inventoryView()
+	if &g1 == nil || &g2 == nil {
+		t.Fatal("no view")
+	}
+	// Same generation: the very same maps come back, not equal copies.
+	if !sameMap(g1, g2) || !sameMap(h1, h2) {
+		t.Error("the view was rebuilt although the inventory had not changed")
+	}
+
+	ec.invChanged()
+	g3, _ := ec.inventoryView()
+	if sameMap(g1, g3) {
+		t.Error("the view was NOT rebuilt after the inventory changed")
+	}
+}
+
+// sameMap reports whether two maps are the same object.
+func sameMap(a, b map[string]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	a["__probe"] = 1
+	_, ok := b["__probe"]
+	delete(a, "__probe")
+	return ok
+}
