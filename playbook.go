@@ -240,9 +240,24 @@ type Task struct {
 	// the task and went UNREACHABLE; a host with no connection variable
 	// ran LOCALLY under `connection: local` on the task beneath a play
 	// saying `connection: ssh`. The same ladder become: already uses.
-	Connection  string
-	RemoteUser  string
-	Port        int
+	Connection string
+	RemoteUser string
+	Port       int
+	// Debugger is the task's `debugger:`. Only `never` is accepted --
+	// the one value that asks for nothing, since it turns off a
+	// debugger this port does not have. Every other value is refused at
+	// parse time.
+	//
+	// The tempting assumption is that the others are no-ops in a
+	// non-interactive run. They are NOT: measured against ansible-core
+	// 2.21.4 with stdin closed, `debugger: on_failed` on a failing task
+	// still prints its prompt --
+	//
+	//	[h1] TASK: fails (debug)> User interrupted execution
+	//
+	// -- so it changes the transcript and the control flow, and
+	// accepting it would be the silent-ignore this list exists to avoid.
+	Debugger    string
 	BecomeUser  string
 	BecomeExe   string
 	BecomeFlags string
@@ -818,7 +833,11 @@ var taskReservedKeys = map[string]bool{
 	// It was already accepted at PLAY level and refused at task level,
 	// so the rule was being applied in one of the two places. These
 	// agree now.
-	"collections":   true,
+	"collections": true,
+	// `debugger` parses; only the value `never` is accepted, which
+	// checkDebugger enforces. Any other value asks for an interactive
+	// session this port does not have.
+	"debugger":      true,
 	"become_method": true, "become_exe": true, "become_flags": true, "notify": true, "listen": true, "action": true, "args": true, "local_action": true, "vars": true, "delegate_to": true,
 	"block": true, "rescue": true, "always": true, "with_items": true,
 	"until": true, "retries": true, "delay": true, "run_once": true,
@@ -856,9 +875,15 @@ func optionalBool(v any) *bool {
 // (ansible.playbook.task.Task.fattributes, 42 entries) is the source of
 // this list.
 var unhonouredTaskKeys = map[string]string{
-	"async_val":      "use async:",
-	"debugger":       "",
-	"delegate_facts": "",
+	"async_val": "use async:",
+	// delegate_facts needs facts to be written to ANOTHER host's
+	// variables and read back. `hostvars` here is built once from the
+	// inventory at play start -- a snapshot, not a live store -- so a
+	// fact written to another host would be invisible to every reader of
+	// it, including that host's own next task. Refused rather than
+	// half-built: the half that would work (a delegate inside the play)
+	// looks identical to the half that would not (a delegate outside it).
+	"delegate_facts": "facts cannot yet be written to another host: hostvars is a snapshot of the inventory",
 	"loop_with":      "use loop: or with_items:",
 }
 
@@ -989,6 +1014,7 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 		ChangedWhen:       str(m["changed_when"]),
 		FailedWhen:        str(m["failed_when"]),
 		Tags:              toStringList(m["tags"]),
+		Debugger:          str(m["debugger"]),
 		BecomeUser:        str(m["become_user"]),
 		Connection:        str(m["connection"]),
 		RemoteUser:        str(m["remote_user"]),
@@ -1156,6 +1182,16 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 			return t, fmt.Errorf("task %q: ambiguous module: both %q and %q present", t.Name, moduleKey, k)
 		}
 		moduleKey = k
+	}
+	// `debugger: never` asks for nothing and is honoured; every other
+	// value asks for an interactive session this port does not have, and
+	// is refused by name rather than ignored. Real's debugger is not a
+	// no-op even without a terminal -- measured, it prints its prompt
+	// and ends the run -- so accepting the others would change what the
+	// playbook does.
+	if t.Debugger != "" && t.Debugger != "never" {
+		return t, fmt.Errorf("task %q: debugger: %q needs an interactive debugger, which this port "+
+			"does not have — only `never` is honoured", t.Name, t.Debugger)
 	}
 	if moduleKey == "" {
 		return t, fmt.Errorf("task %q: no module specified", t.Name)
