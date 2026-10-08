@@ -94,9 +94,14 @@ func TestUnhonouredTaskKeywordsAreNamed(t *testing.T) {
 	// change which module a bare name resolves to here. It was already
 	// accepted at PLAY level while being refused at task level, so the
 	// rule was only half applied. See TestCollectionsIsAcceptedEverywhere.
+	// `debugger: never` left it: it is the one value that asks for
+	// nothing, since it turns OFF a debugger this port does not have.
+	// Every other value is still refused -- see TestDebuggerOnlyNever,
+	// which also records why the others are not no-ops in a
+	// non-interactive run.
 	for _, kw := range []string{
 		"delegate_facts: true",
-		"debugger: never",
+		"debugger: on_failed",
 	} {
 		t.Run(kw, func(t *testing.T) {
 			_, err := Parse([]byte("- {name: p, hosts: all, gather_facts: false, tasks: [{name: t, debug: {msg: x}, " + kw + "}]}\n"))
@@ -402,5 +407,47 @@ func TestCollectionsIsAcceptedEverywhere(t *testing.T) {
 	}
 	if got := pb[0].Tasks[0].Module; got != "debug" {
 		t.Errorf("module = %q, want debug -- collections: was taken for the module", got)
+	}
+}
+
+// TestDebuggerOnlyNever: `never` asks for nothing, so it is honoured;
+// every other value asks for an interactive session this port does not
+// have.
+//
+// The tempting assumption is that the others are no-ops without a
+// terminal. They are NOT. Measured against ansible-core 2.21.4 with
+// stdin closed, `debugger: on_failed` on a failing task prints
+//
+//	[h1] TASK: fails (debug)> User interrupted execution
+//
+// so it changes both the transcript and the control flow. Accepting it
+// would be exactly the silent-ignore the refusal list exists to avoid.
+func TestDebuggerOnlyNever(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		ok    bool
+	}{
+		{"never", true},
+		{"always", false},
+		{"on_failed", false},
+		{"on_unreachable", false},
+		{"on_skipped", false},
+	} {
+		src := "- {name: p, hosts: all, gather_facts: false, tasks: [{name: t, debugger: " +
+			tc.value + ", debug: {msg: x}}]}\n"
+		pb, err := Parse([]byte(src))
+		switch {
+		case tc.ok && err != nil:
+			t.Errorf("debugger: %s was refused; it asks for nothing: %v", tc.value, err)
+		case tc.ok && err == nil:
+			// and it did not get taken for the module name on the way in
+			if got := pb[0].Tasks[0].Module; got != "debug" {
+				t.Errorf("module = %q, want debug", got)
+			}
+		case !tc.ok && err == nil:
+			t.Errorf("debugger: %s parsed; this port has no debugger, so it must be refused", tc.value)
+		case !tc.ok && !strings.Contains(err.Error(), tc.value):
+			t.Errorf("the refusal of %q does not name the value: %v", tc.value, err)
+		}
 	}
 }
