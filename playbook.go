@@ -225,6 +225,24 @@ type Task struct {
 	FailedWhen  string
 	Tags        []string
 	Become      *bool // nil means "inherit the play's setting"
+
+	// Connection, RemoteUser and Port are this task's own
+	// connection:/remote_user:/port:. They were refused by name until
+	// the engine could change a connection mid-play; now that a task's
+	// variables decide which connection it gets, these are simply the
+	// keyword spelling of ansible_connection/ansible_user/ansible_port.
+	//
+	// Measured precedence, against ansible-core 2.21.4:
+	//
+	//	host var  >  task keyword  >  play keyword
+	//
+	// A host with ansible_connection=ssh ignored `connection: local` on
+	// the task and went UNREACHABLE; a host with no connection variable
+	// ran LOCALLY under `connection: local` on the task beneath a play
+	// saying `connection: ssh`. The same ladder become: already uses.
+	Connection  string
+	RemoteUser  string
+	Port        int
 	BecomeUser  string
 	BecomeExe   string
 	BecomeFlags string
@@ -780,6 +798,7 @@ var taskReservedKeys = map[string]bool{
 	"name": true, "when": true, "loop": true, "loop_control": true,
 	"register": true, "ignore_errors": true, "changed_when": true,
 	"failed_when": true, "tags": true, "become": true, "become_user": true,
+	"connection": true, "remote_user": true, "port": true,
 	"become_method": true, "become_exe": true, "become_flags": true, "notify": true, "listen": true, "action": true, "args": true, "local_action": true, "vars": true, "delegate_to": true,
 	"block": true, "rescue": true, "always": true, "with_items": true,
 	"until": true, "retries": true, "delay": true, "run_once": true,
@@ -819,12 +838,9 @@ func optionalBool(v any) *bool {
 var unhonouredTaskKeys = map[string]string{
 	"async_val":      "use async:",
 	"collections":    "fully-qualified module names resolve without it",
-	"connection":     "set it on the PLAY, which this port honours, or ansible_connection on the host",
 	"debugger":       "",
 	"delegate_facts": "",
 	"loop_with":      "use loop: or with_items:",
-	"port":           "set it on the PLAY, which this port honours, or ansible_port on the host",
-	"remote_user":    "set it on the PLAY, which this port honours, or ansible_user on the host",
 }
 
 // includeReservedKeys are the extra keys recognized on an
@@ -955,6 +971,9 @@ func parseTask(ctx parseCtx, m map[string]any) (Task, error) {
 		FailedWhen:        str(m["failed_when"]),
 		Tags:              toStringList(m["tags"]),
 		BecomeUser:        str(m["become_user"]),
+		Connection:        str(m["connection"]),
+		RemoteUser:        str(m["remote_user"]),
+		Port:              toInt(m["port"]),
 		BecomeExe:         str(m["become_exe"]),
 		BecomeFlags:       str(m["become_flags"]),
 		Notify:            toStringList(m["notify"]),

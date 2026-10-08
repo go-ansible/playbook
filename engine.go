@@ -865,6 +865,10 @@ func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *Pla
 				// nothing until a task actually wants one.
 				mu.Lock()
 				st.connErr = err
+				// The signature that FAILED, so a later task asking for
+				// a different connection can be told apart from one
+				// asking for the same unreachable endpoint again.
+				st.connSig = ec.connSignature(Task{}, e.resolved(st.vc.Merged()))
 				if play.GatherFacts {
 					ec.reportUnreachable(pr, st, Task{Name: gatheringFactsTask}, err)
 				}
@@ -872,7 +876,7 @@ func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *Pla
 				return
 			}
 			st.conn = conn
-			st.connSig = ec.connSignature(e.resolved(st.vc.Merged()))
+			st.connSig = ec.connSignature(Task{}, e.resolved(st.vc.Merged()))
 			st.conns = map[string]remoteexec.Connection{st.connSig: conn}
 			if !play.GatherFacts {
 				return
@@ -1817,6 +1821,28 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				aborted = true
 				break
 			}
+			// A task asking for a DIFFERENT connection than the one that
+			// failed gets a fresh attempt. Real dials nothing until a
+			// task reaches for a connection, so a play-level
+			// `connection: ssh` on an unreachable host does not doom a
+			// task that says `connection: local` -- measured: real runs
+			// that task locally where this port reported UNREACHABLE
+			// from the play-start dial it had already made.
+			//
+			// Only when the signature DIFFERS: retrying the same
+			// unreachable endpoint for every task would add an SSH
+			// timeout per task to a host that is simply down.
+			if !handled && st.conn == nil && st.connErr != nil && task.DelegateTo == "" &&
+				!connectionlessModules[modules.NormalizeName(task.Module)] {
+				if sig := ec.connSignature(task, mergedVars); sig != st.connSig {
+					if c, err := ec.reconnect(ctx, st, task, sig, mergedVars); err == nil {
+						st.conn, st.connErr = c, nil
+					} else {
+						st.connErr = err
+						st.connSig = sig
+					}
+				}
+			}
 			if !handled && st.conn == nil && st.connErr != nil &&
 				!connectionlessModules[modules.NormalizeName(task.Module)] && task.DelegateTo == "" {
 				// The host has no connection and this task needs one.
@@ -2226,8 +2252,8 @@ func (ec *execCtx) connectionFor(ctx context.Context, task Task, mergedVars map[
 	// reaches for a connection, so its debug still reports ok. Dialling
 	// for every task instead gave ok=1 against real's ok=2.
 	if conn != nil && !connectionlessModules[modules.NormalizeName(task.Module)] {
-		if sig := ec.connSignature(mergedVars); sig != st.connSig {
-			next, err := ec.reconnect(ctx, st, sig, mergedVars)
+		if sig := ec.connSignature(task, mergedVars); sig != st.connSig {
+			next, err := ec.reconnect(ctx, st, task, sig, mergedVars)
 			if err != nil {
 				// A connection that cannot be made is UNREACHABLE, not a
 				// failed task -- real counts it in the recap's own
@@ -3343,6 +3369,47 @@ func pythonBool(b bool) string {
 // Ignoring these was not a cosmetic gap: a play saying
 // `connection: local` was connected to over SSH, so every task on it
 // came back UNREACHABLE.
+// withTaskConnection layers a TASK's connection:/remote_user:/port: on
+// top of the play's, under the host's own variables. The order is the
+// measured one -- host var > task keyword > play keyword -- and is why
+// this is one function rather than two calls: applying the play's
+// defaults after the task's would let a play keyword beat a task one.
+func withTaskConnection(play Play, task Task, vars map[string]any) map[string]any {
+	if task.Connection == "" && task.RemoteUser == "" && task.Port == 0 {
+		return withPlayConnection(play, vars)
+	}
+	defaults := map[string]any{}
+	if play.Connection != "" {
+		defaults["ansible_connection"] = play.Connection
+	}
+	if play.RemoteUser != "" {
+		defaults["ansible_user"] = play.RemoteUser
+	}
+	if play.Port != 0 {
+		defaults["ansible_port"] = play.Port
+	}
+	// The task's own keywords beat the play's.
+	if task.Connection != "" {
+		defaults["ansible_connection"] = task.Connection
+	}
+	if task.RemoteUser != "" {
+		defaults["ansible_user"] = task.RemoteUser
+	}
+	if task.Port != 0 {
+		defaults["ansible_port"] = task.Port
+	}
+	out := make(map[string]any, len(vars)+len(defaults))
+	for k, v := range defaults {
+		out[k] = v
+	}
+	// And the host's own values beat both -- measured: a host with
+	// ansible_connection=ssh ignores `connection: local` on the task.
+	for k, v := range vars {
+		out[k] = v
+	}
+	return out
+}
+
 func withPlayConnection(play Play, vars map[string]any) map[string]any {
 	defaults := map[string]any{}
 	if play.Connection != "" {
@@ -3813,7 +3880,7 @@ func extendedLoopVars(items []any, index int, allItems *bool) map[string]any {
 // A failure is returned rather than swallowed: a task that asked for a
 // different connection and silently got the old one is the defect this
 // exists to fix, and would be indistinguishable from success.
-func (ec *execCtx) reconnect(ctx context.Context, st *hostState, sig string, vars map[string]any) (remoteexec.Connection, error) {
+func (ec *execCtx) reconnect(ctx context.Context, st *hostState, task Task, sig string, vars map[string]any) (remoteexec.Connection, error) {
 	if c, ok := st.conns[sig]; ok {
 		st.conn, st.connSig = c, sig
 		return c, nil
@@ -3829,7 +3896,7 @@ func (ec *execCtx) reconnect(ctx context.Context, st *hostState, sig string, var
 	// DefaultConnect already says "connecting to <host>" in its own
 	// error, so this does not say it again -- the first version produced
 	// "connecting to localhost: connecting to localhost: ...".
-	c, err := ec.engine.Connect(ctx, st.name, withPlayConnection(ec.play, vars))
+	c, err := ec.engine.Connect(ctx, st.name, withTaskConnection(ec.play, task, vars))
 	if err != nil {
 		return nil, err
 	}
@@ -3848,8 +3915,8 @@ func (ec *execCtx) reconnect(ctx context.Context, st *hostState, sig string, var
 // without them differs from one computed with them for every task of
 // such a play -- which would have reconnected on every single task
 // instead of never.
-func (ec *execCtx) connSignature(vars map[string]any) string {
-	return connectionSignature(withPlayConnection(ec.play, vars))
+func (ec *execCtx) connSignature(task Task, vars map[string]any) string {
+	return connectionSignature(withTaskConnection(ec.play, task, vars))
 }
 
 // unreachableError marks a failure to CONNECT, as opposed to a task that
