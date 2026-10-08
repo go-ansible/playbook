@@ -799,6 +799,21 @@ var taskReservedKeys = map[string]bool{
 	"register": true, "ignore_errors": true, "changed_when": true,
 	"failed_when": true, "tags": true, "become": true, "become_user": true,
 	"connection": true, "remote_user": true, "port": true,
+	// collections: is accepted and has no effect here, which is NOT the
+	// same as silently ignoring a keyword that changes what runs. This
+	// registry is a single flat namespace by construction:
+	// NormalizeName strips every known collection prefix, so
+	// `community.general.ufw` and a bare `ufw` are the same entry, and
+	// the 566 registrations carry 566 DISTINCT names (pinned by
+	// TestNoDuplicateRegistrations in go-ansible/modules -- a duplicate
+	// would silently hide a module). So no search path can change which
+	// module a bare name resolves to, and refusing the keyword only
+	// rejected playbooks that work against real.
+	//
+	// It was already accepted at PLAY level and refused at task level,
+	// so the rule was being applied in one of the two places. These
+	// agree now.
+	"collections":   true,
 	"become_method": true, "become_exe": true, "become_flags": true, "notify": true, "listen": true, "action": true, "args": true, "local_action": true, "vars": true, "delegate_to": true,
 	"block": true, "rescue": true, "always": true, "with_items": true,
 	"until": true, "retries": true, "delay": true, "run_once": true,
@@ -837,7 +852,6 @@ func optionalBool(v any) *bool {
 // this list.
 var unhonouredTaskKeys = map[string]string{
 	"async_val":      "use async:",
-	"collections":    "fully-qualified module names resolve without it",
 	"debugger":       "",
 	"delegate_facts": "",
 	"loop_with":      "use loop: or with_items:",

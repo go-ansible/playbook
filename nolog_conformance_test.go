@@ -87,8 +87,14 @@ func TestUnhonouredTaskKeywordsAreNamed(t *testing.T) {
 	// The rest stay refused on purpose: silently accepting a keyword
 	// this port does not honour would mean running something other than
 	// what the playbook says, which is worse than saying no.
+	// collections: left it too, and for a different reason from the
+	// others: it is ACCEPTED and has no effect, because this registry is
+	// a flat namespace by construction (NormalizeName strips every known
+	// collection prefix) with 566 distinct names. No search path can
+	// change which module a bare name resolves to here. It was already
+	// accepted at PLAY level while being refused at task level, so the
+	// rule was only half applied. See TestCollectionsIsAcceptedEverywhere.
 	for _, kw := range []string{
-		"collections: [a.b]",
 		"delegate_facts: true",
 		"debugger: never",
 	} {
@@ -367,4 +373,34 @@ func runAndCaptureVerbose(t *testing.T, src string, verbosity int) string {
 		t.Fatal(err)
 	}
 	return buf.String()
+}
+
+// TestCollectionsIsAcceptedEverywhere pins both halves. Real accepts
+// `collections:` at play AND task level (measured, both run). This port
+// accepted it on a play and refused it on a task, which is the same rule
+// applied in one of two places.
+//
+// Accepting it is not "silently ignoring a keyword": it cannot change
+// what runs here. The module registry is one flat namespace by
+// construction -- NormalizeName strips every known collection prefix, so
+// `community.general.ufw` and a bare `ufw` are the same entry -- and no
+// two modules share a bare name. A search path has nothing to search.
+func TestCollectionsIsAcceptedEverywhere(t *testing.T) {
+	for _, src := range []string{
+		"- {name: p, hosts: all, gather_facts: false, collections: [ansible.builtin], tasks: [{name: t, debug: {msg: x}}]}\n",
+		"- {name: p, hosts: all, gather_facts: false, tasks: [{name: t, collections: [ansible.builtin], debug: {msg: x}}]}\n",
+	} {
+		if _, err := Parse([]byte(src)); err != nil {
+			t.Errorf("collections: was refused, and real accepts it here: %v", err)
+		}
+	}
+	// And it is not read as the module name on the way through, which is
+	// how an unrecognised key used to fail.
+	pb, err := Parse([]byte("- {name: p, hosts: all, gather_facts: false, tasks: [{name: t, collections: [a.b], debug: {msg: x}}]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := pb[0].Tasks[0].Module; got != "debug" {
+		t.Errorf("module = %q, want debug -- collections: was taken for the module", got)
+	}
 }
