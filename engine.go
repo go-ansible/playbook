@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-ansible/facts"
@@ -328,6 +329,15 @@ type execCtx struct {
 	// tripped. It stops the whole PLAY, not just this batch: a rolling
 	// update that gives up must not roll on to the next batch.
 	playAborted bool
+
+	// invGen counts mutations of the inventory (add_host, group_by), and
+	// invView* caches the derived `groups`/`hostvars` for one generation
+	// so a playbook that never mutates it pays one atomic load per task.
+	invGen          atomic.Uint64
+	invMu           sync.RWMutex
+	invViewGen      uint64
+	invViewGroups   map[string]any
+	invViewHostvars map[string]any
 
 	// staticHostvars is the inventory's own view of every host, built
 	// once -- the fallback for a host that is not in this play and so
@@ -2626,7 +2636,10 @@ func (ec *execCtx) runAddHost(args map[string]any) (modules.Result, error) {
 		}
 		vals[k] = v
 	}
+	ec.invMu.Lock()
 	ec.engine.Inventory.AddHost(name, vals, groups...)
+	ec.invMu.Unlock()
+	ec.invChanged()
 	return modules.Changed("added host " + name), nil
 }
 
