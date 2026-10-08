@@ -730,6 +730,32 @@ func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Hos
 	// DETERMINISTIC, where racing one goroutine per host for a single
 	// permit is not: ordering within a task came out three different
 	// ways across twenty runs.
+	// host_pinned is free with ONE added rule, and real implements it as
+	// exactly that: `class StrategyModule(FreeStrategyModule)` with
+	// `self._host_pinned = True`. The rule, from its own documentation,
+	// is that "Ansible will not start a play for a host unless the play
+	// can be finished without interruption by tasks for another host,
+	// i.e. the number of hosts with an active play does not exceed the
+	// number of forks". A host keeps its slot until it is done, and
+	// only then does a waiting host start.
+	//
+	// It does NOT collapse to linear at one fork, where free does --
+	// measured, three strategies over two hosts at -f 1:
+	//
+	//	linear       one[h1 h2] two[h1 h2] three[h1 h2]
+	//	free         one[h1 h2] two[h1 h2] three[h1 h2]   (same)
+	//	host_pinned  one[h1] two[h1] three[h1] one[h2] two[h2] three[h2]
+	//
+	// so the branch below cannot be shared with free's.
+	if play.Strategy == "host_pinned" {
+		ec.free = true
+		runHostPinned(ctx, ec, play, active, pr)
+		e.noteFailedHosts(ec)
+		if ec.playAborted {
+			e.playbookAborted = true
+		}
+		return ec.playAborted
+	}
 	if play.Strategy == "free" && e.Forks != 1 {
 		ec.free = true
 		runFree(ctx, ec, play, active, pr)
@@ -785,6 +811,47 @@ func runFree(ctx context.Context, ec *execCtx, play Play, active []string, pr *P
 			ec.runTaskList(ctx, play.Tasks, []string{h}, pr)
 			ec.runHandlers(ctx, []string{h}, pr)
 		}(h)
+	}
+	wg.Wait()
+}
+
+// runHostPinned implements the "host_pinned" strategy: like free, each
+// host runs the play's whole task list in its own goroutine -- but a
+// host does not START until a fork slot is free, and it holds that slot
+// until it is finished. So the number of hosts with a play in progress
+// never exceeds --forks, which is the strategy's whole definition.
+//
+// The slot is taken HERE, per host, and the per-task limiter is turned
+// off for the duration (ec.sem = nil). Both would deadlock at --forks 1:
+// the host would hold the only permit and then wait for one to run its
+// first task. That is also the right model rather than a workaround --
+// under host_pinned a host occupies one worker for its whole play,
+// which is precisely what real's accounting does.
+func runHostPinned(ctx context.Context, ec *execCtx, play Play, active []string, pr *PlayResult) {
+	slots := ec.sem
+	// Inside a pinned host the slot is already held; a second limiter
+	// would be waiting on permits this goroutine is itself holding.
+	ec.sem = nil
+
+	var wg sync.WaitGroup
+	for _, h := range active {
+		// The slot is taken HERE, in the loop, rather than inside the
+		// goroutine: hosts must be pinned in inventory ORDER, and
+		// goroutines racing for a permit are not ordered. Measured
+		// against real at -f 1 over h1 and h2, real runs h1's whole
+		// play then h2's; the first version of this launched every
+		// goroutine first and ran h2 first about as often as h1.
+		//
+		// Blocking here is the point: with one fork, h2's acquire does
+		// not return until h1 is finished, which is the strategy.
+		release := slots.acquire()
+		wg.Add(1)
+		go func(h string, release func()) {
+			defer wg.Done()
+			defer release()
+			ec.runTaskList(ctx, play.Tasks, []string{h}, pr)
+			ec.runHandlers(ctx, []string{h}, pr)
+		}(h, release)
 	}
 	wg.Wait()
 }
