@@ -6,7 +6,7 @@ require (
 	github.com/go-ansible/facts v0.18.0
 	github.com/go-ansible/inventory v0.19.0
 	github.com/go-ansible/modules v0.82.0
-	github.com/go-ansible/template v0.32.0
+	github.com/go-ansible/template v0.33.0
 	github.com/go-ansible/vars v0.2.0
 	github.com/go-ansible/vault v0.9.0
 	github.com/go-remoteexec/transport v0.5.0
@@ -15,8 +15,8 @@ require (
 require (
 	github.com/Azure/go-ntlmssp v0.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/go-encryptions/unixcrypt v0.1.0 // indirect
-	github.com/go-regexp/engine v0.1.3 // indirect
+	github.com/go-encryptions/unixcrypt v0.2.0 // indirect
+	github.com/go-regexp/engine v0.3.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
