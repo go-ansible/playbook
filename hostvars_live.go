@@ -96,7 +96,14 @@ func (ec *execCtx) refreshHostvars(st *hostState) {
 // host count on every task, and nothing reads
 // hostvars['h2']['hostvars'].
 func (ec *execCtx) snapshotVars(st *hostState) {
-	m := ec.engine.resolved(st.vc.Merged())
+	// resolvedFor, not resolved: the snapshot is taken at the END of a
+	// task, when a value the task just registered is in the store. The
+	// unbraked form re-rendered it, so a module result containing
+	// `{{ ... }}` was evaluated HERE -- which is where the proof of
+	// concept kept firing after the brake went into every other call
+	// site. A security brake is only as good as its least-covered
+	// caller, and this caller was added by the hostvars work itself.
+	m := ec.engine.resolvedFor(st.vc)
 	snap := make(map[string]any, len(m))
 	for k, v := range m {
 		if k == "hostvars" {

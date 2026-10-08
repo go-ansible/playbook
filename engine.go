@@ -949,7 +949,7 @@ func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *Pla
 			defer wg.Done()
 			release := ec.acquire()
 			defer release()
-			conn, err := e.Connect(ctx, st.name, withPlayConnection(play, e.resolved(st.vc.Merged())))
+			conn, err := e.Connect(ctx, st.name, withPlayConnection(play, e.resolvedFor(st.vc)))
 			if err != nil {
 				// Not reported here: a play that gathers no facts
 				// needs no connection yet, and real Ansible says
@@ -959,7 +959,7 @@ func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *Pla
 				// The signature that FAILED, so a later task asking for
 				// a different connection can be told apart from one
 				// asking for the same unreachable endpoint again.
-				st.connSig = ec.connSignature(Task{}, e.resolved(st.vc.Merged()))
+				st.connSig = ec.connSignature(Task{}, e.resolvedFor(st.vc))
 				if play.GatherFacts {
 					ec.reportUnreachable(pr, st, Task{Name: gatheringFactsTask}, err)
 				}
@@ -967,7 +967,7 @@ func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *Pla
 				return
 			}
 			st.conn = conn
-			st.connSig = ec.connSignature(Task{}, e.resolved(st.vc.Merged()))
+			st.connSig = ec.connSignature(Task{}, e.resolvedFor(st.vc))
 			st.conns = map[string]remoteexec.Connection{st.connSig: conn}
 			if !play.GatherFacts {
 				return
@@ -1126,7 +1126,7 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 		var passed []string
 		for _, h := range active {
 			st := ec.states[h]
-			ok, err := ec.evalWhen(task.When, ec.engine.resolved(st.vc.Merged()))
+			ok, err := ec.evalWhen(task.When, ec.engine.resolvedFor(st.vc))
 			if err != nil {
 				ec.report(pr, Result{Host: h, Task: task.Name, TaskID: task.ID, Failed: true, Msg: conditionalFailure("when", err)})
 				continue
@@ -1190,7 +1190,7 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 			// readable in always: and after the block — measured, not
 			// assumed.
 			st.vc.SetVar(vars.Facts, "ansible_failed_task",
-				failedTaskDict(st.lastFailedTask, ec.play, resolvedConnection(ec.play, ec.engine.resolved(st.vc.Merged()))))
+				failedTaskDict(st.lastFailedTask, ec.play, resolvedConnection(ec.play, ec.engine.resolvedFor(st.vc))))
 			st.vc.SetVar(vars.Facts, "ansible_failed_result", st.lastFailedResult)
 		}
 		afterRescue := ec.runTaskList(ctx, task.Rescue, newlyFailed, pr)
@@ -1678,7 +1678,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 	// whole task where real runs the first. A playbook that says to
 	// skip an item acted on it anyway.
 	if task.When != "" && task.Loop == nil {
-		ok, err := ec.evalWhen(task.When, ec.engine.resolved(scope.Merged()))
+		ok, err := ec.evalWhen(task.When, ec.engine.resolvedFor(scope))
 		if err != nil {
 			ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: conditionalFailure("when", err)})
 			return !task.IgnoreErrors
@@ -1727,7 +1727,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 	items := []any{nil}
 	looping := task.Loop != nil
 	if looping {
-		rendered, err := ec.engine.Template.RenderValue(task.Loop, ec.engine.resolved(scope.Merged()))
+		rendered, err := ec.engine.Template.RenderValue(task.Loop, ec.engine.resolvedFor(scope))
 		if err != nil {
 			ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: "loop: " + err.Error()})
 			return !task.IgnoreErrors
@@ -1742,7 +1742,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		// is two terms), anything else is one (with_dict: "{{ d }}").
 		// The plugin then produces the items to loop over.
 		if task.LoopWith != "" {
-			produced, lerr := ec.engine.Template.Lookup(task.LoopWith, items, ec.engine.resolved(scope.Merged()), nil)
+			produced, lerr := ec.engine.Template.Lookup(task.LoopWith, items, ec.engine.resolvedFor(scope), nil)
 			if lerr != nil {
 				ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors,
 					Msg: "with_" + task.LoopWith + ": " + lerr.Error()})
@@ -1835,7 +1835,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			if task.LoopLabel != "" {
 				// Rendered with the item already in scope, so
 				// `label: "{{ item.name }}"` resolves per iteration.
-				if rendered, lerr := ec.engine.Template.Render(task.LoopLabel, ec.engine.resolved(iter.Merged())); lerr == nil {
+				if rendered, lerr := ec.engine.Template.Render(task.LoopLabel, ec.engine.resolvedFor(iter)); lerr == nil {
 					label = rendered
 				}
 			}
@@ -1858,7 +1858,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			// Now that `item` is bound, the condition can be asked
 			// about THIS item.
 			if task.When != "" {
-				ok, werr := ec.evalWhen(task.When, ec.engine.resolved(iter.Merged()))
+				ok, werr := ec.evalWhen(task.When, ec.engine.resolvedFor(iter))
 				if werr != nil {
 					ec.report(pr, Result{Host: st.name, Task: task.Name, TaskID: task.ID, Module: task.Module, Failed: true, Ignored: task.IgnoreErrors, Msg: conditionalFailure("when", werr), Item: item, ItemLabel: label, LoopVar: task.LoopVar, Looped: true})
 					anyFailed = true
@@ -1901,7 +1901,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		aborted := false
 
 		for attempt := 1; attempt <= totalAttempts; attempt++ {
-			mergedVars = ec.engine.resolved(iter.Merged())
+			mergedVars = ec.engine.resolvedFor(iter)
 
 			args, err := ec.renderArgs(task, mergedVars)
 			if err != nil {
@@ -2086,7 +2086,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			// to see.
 			if task.Register != "" {
 				iter.SetVar(vars.Registered, task.Register, attemptView)
-				mergedVars = ec.engine.resolved(iter.Merged())
+				mergedVars = ec.engine.resolvedFor(iter)
 			}
 
 			cond := task.Until
@@ -2181,7 +2181,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		// ONE line carrying the module's own keys alongside it.
 		breakNow := false
 		if looping && task.LoopBreakWhen != "" {
-			brk, berr := ec.evalWhen(task.LoopBreakWhen, ec.engine.resolved(iter.Merged()))
+			brk, berr := ec.evalWhen(task.LoopBreakWhen, ec.engine.resolvedFor(iter))
 			switch {
 			case berr != nil:
 				text := conditionalResultOf(berr)
@@ -2516,7 +2516,7 @@ func (ec *execCtx) runAssert(args map[string]any, st *hostState) (modules.Result
 		conditions = []any{raw}
 	}
 
-	vars := ec.engine.resolved(st.vc.Merged())
+	vars := ec.engine.resolvedFor(st.vc)
 	for _, cond := range conditions {
 		truthy, err := ec.evalCondition(cond, vars)
 		if err != nil {
