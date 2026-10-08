@@ -2,6 +2,7 @@ package playbook
 
 import (
 	"context"
+	"errors"
 	"os"
 	"regexp"
 	"strings"
@@ -250,5 +251,195 @@ func TestFactsDoNotChangeTheSignature(t *testing.T) {
 	}
 	if strings.Contains(connectionSignature(base), "ansible_hostname") {
 		t.Error("the signature carries a fact")
+	}
+}
+
+// TestTaskConnectionKeywordIsHonoured pins the ladder MEASURED against
+// ansible-core 2.21.4:
+//
+//		host var  >  task keyword  >  play keyword
+//
+//	  - a host with ansible_connection=ssh ignored `connection: local` on
+//	    the task and went UNREACHABLE;
+//	  - a host with no connection variable ran LOCALLY under
+//	    `connection: local` on the task beneath a play saying
+//	    `connection: ssh`.
+//
+// It is the same ladder become: already uses, which is the reason to
+// trust it rather than a coincidence of one probe.
+func TestTaskConnectionKeywordIsHonoured(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		inventory string
+		play      string
+		wantConn  string
+	}{
+		{
+			name:      "a task keyword beats the play's",
+			inventory: "all:\n  hosts:\n    a-host: {}\n",
+			play:      "- {name: p, hosts: all, gather_facts: false, connection: ssh, tasks: [{name: t, connection: local, command: echo x}]}\n",
+			wantConn:  "local",
+		},
+		{
+			name:      "a host variable beats the task keyword",
+			inventory: "all:\n  hosts:\n    a-host: {ansible_connection: ssh}\n",
+			play:      "- {name: p, hosts: all, gather_facts: false, tasks: [{name: t, connection: local, command: echo x}]}\n",
+			wantConn:  "ssh",
+		},
+		{
+			name:      "the play's applies when the task says nothing",
+			inventory: "all:\n  hosts:\n    a-host: {}\n",
+			play:      "- {name: p, hosts: all, gather_facts: false, connection: ssh, tasks: [{name: t, command: echo x}]}\n",
+			wantConn:  "ssh",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv, err := inventory.ParseYAML([]byte(tc.inventory))
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := New(inv)
+			_, seen := countingConnect(t, e)
+
+			pb, err := Parse([]byte(tc.play))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+				t.Fatal(err)
+			}
+			if len(*seen) == 0 {
+				t.Fatal("never connected, so nothing was decided")
+			}
+			// The LAST dial is the one the task ran on.
+			got := (*seen)[len(*seen)-1]["ansible_connection"]
+			if got != tc.wantConn {
+				t.Errorf("connected with ansible_connection=%v, want %q", got, tc.wantConn)
+			}
+		})
+	}
+}
+
+// remote_user: and port: travel the same road, and are asserted
+// separately because a signature that carried only ansible_connection
+// would pass the test above and silently drop these two.
+func TestTaskRemoteUserAndPortAreHonoured(t *testing.T) {
+	inv, err := inventory.ParseYAML([]byte("all:\n  hosts:\n    a-host: {}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(inv)
+	_, seen := countingConnect(t, e)
+
+	pb, err := Parse([]byte(`
+- name: p
+  hosts: all
+  gather_facts: false
+  connection: local
+  remote_user: play-user
+  port: 2000
+  tasks:
+    - name: t
+      remote_user: task-user
+      port: 2222
+      command: echo x
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	last := (*seen)[len(*seen)-1]
+	if last["ansible_user"] != "task-user" {
+		t.Errorf("ansible_user = %v, want the task's", last["ansible_user"])
+	}
+	if last["ansible_port"] != 2222 {
+		t.Errorf("ansible_port = %v, want the task's", last["ansible_port"])
+	}
+}
+
+// TestATaskAskingForADifferentConnectionRetries is the case the unit
+// tests above could not see, because they stub Connect and it never
+// fails. Measured end to end: a play saying `connection: ssh` over a
+// host that cannot be reached, with a task saying `connection: local`.
+// Real runs that task LOCALLY -- it dials nothing until a task reaches
+// for a connection -- where this port reported UNREACHABLE from the dial
+// it had already made at play start.
+func TestATaskAskingForADifferentConnectionRetries(t *testing.T) {
+	inv, err := inventory.ParseYAML([]byte("all:\n  hosts:\n    a-host: {}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(inv)
+	var attempts []string
+	e.Connect = func(_ context.Context, _ string, hv map[string]any) (remoteexec.Connection, error) {
+		conn, _ := hv["ansible_connection"].(string)
+		attempts = append(attempts, conn)
+		if conn != "local" {
+			return nil, errors.New("no route to host")
+		}
+		return remoteexec.NewLocal(), nil
+	}
+
+	pb, err := Parse([]byte(`
+- name: p
+  hosts: all
+  gather_facts: false
+  connection: ssh
+  tasks:
+    - name: t
+      connection: local
+      command: echo x
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr, err := e.RunPlaybook(context.Background(), pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := rr.Summary()["a-host"]; s == nil || s.Unreachable != 0 || s.Changed != 1 {
+		t.Errorf("the task did not run on its own connection: %+v (attempts: %v)", s, attempts)
+	}
+	if len(attempts) < 2 || attempts[len(attempts)-1] != "local" {
+		t.Errorf("the retry did not use the task's connection: %v", attempts)
+	}
+}
+
+// ...but a task asking for the SAME unreachable endpoint must not dial
+// again. Real re-attempts per task; this port reports from the recorded
+// failure instead, because retrying adds a full SSH timeout per task to
+// a host that is simply down. The difference is visible only in TIMING,
+// so it is a deliberate, named divergence rather than an oversight.
+func TestTheSameUnreachableEndpointIsNotRedialledPerTask(t *testing.T) {
+	inv, err := inventory.ParseYAML([]byte("all:\n  hosts:\n    a-host: {}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(inv)
+	dials := 0
+	e.Connect = func(context.Context, string, map[string]any) (remoteexec.Connection, error) {
+		dials++
+		return nil, errors.New("no route to host")
+	}
+
+	pb, err := Parse([]byte(`
+- name: p
+  hosts: all
+  gather_facts: false
+  tasks:
+    - {name: one, command: echo 1, ignore_unreachable: true}
+    - {name: two, command: echo 2, ignore_unreachable: true}
+    - {name: three, command: echo 3, ignore_unreachable: true}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	if dials != 1 {
+		t.Errorf("dialled %d times for the same unreachable endpoint; want 1", dials)
 	}
 }

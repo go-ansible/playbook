@@ -77,11 +77,17 @@ func TestUnhonouredTaskKeywordsAreNamed(t *testing.T) {
 	// TestBecomeKeywordsNoLongerRefused, which also checks they did not
 	// fall back to reading as a module name on the way out.
 	//
-	// The rest stay refused on purpose: silently accepting
-	// `connection: local` would mean running something other than what
-	// the playbook says, which is worse than saying no.
+	// connection:, remote_user: and port: left it too. They were
+	// refused only because a connection was built once per play and
+	// could not change; now that a task's variables decide which
+	// connection it gets, they are the keyword spelling of
+	// ansible_connection/ansible_user/ansible_port. See
+	// TestTaskConnectionKeywordIsHonoured for the measured precedence.
+	//
+	// The rest stay refused on purpose: silently accepting a keyword
+	// this port does not honour would mean running something other than
+	// what the playbook says, which is worse than saying no.
 	for _, kw := range []string{
-		"connection: local", "remote_user: x", "port: 22",
 		"collections: [a.b]",
 		"delegate_facts: true",
 		"debugger: never",
