@@ -235,6 +235,13 @@ type hostState struct {
 	conn remoteexec.Connection
 	vc   *vars.Context
 
+	// snapshot is this host's variables as other hosts see them through
+	// hostvars, guarded because every other host's goroutine may read it
+	// while this one replaces it. Replaced wholesale, never mutated, so
+	// a reader holding one holds something nobody will write to.
+	snapMu   sync.Mutex
+	snapshot map[string]any
+
 	// connSig is the connectionSignature st.conn was built from, and
 	// conns holds every connection this host has opened, keyed by
 	// signature, so switching back and forth does not dial twice.
@@ -321,6 +328,12 @@ type execCtx struct {
 	// tripped. It stops the whole PLAY, not just this batch: a rolling
 	// update that gives up must not roll on to the next batch.
 	playAborted bool
+
+	// staticHostvars is the inventory's own view of every host, built
+	// once -- the fallback for a host that is not in this play and so
+	// publishes no snapshot of its own. Real's hostvars covers the whole
+	// inventory, not just the batch.
+	staticHostvars map[string]any
 
 	// playHostsAll is every host the PLAY matched, across all serial
 	// batches -- ansible_play_hosts_all, and the starting value of
@@ -650,6 +663,7 @@ func (e *Engine) runBatch(ctx context.Context, play Play, hosts []*inventory.Hos
 	// templates one host's config from another's facts.
 	groupsVar := e.groupsVar()
 	hostvarsVar := e.hostvarsVar(groupsVar)
+	ec.staticHostvars = hostvarsVar
 	playHosts := append([]string{}, order...)
 	// Absolute, as real reports it: a relative playbook path still
 	// yields a full directory.
@@ -963,6 +977,18 @@ func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *Pla
 		}(st)
 	}
 	wg.Wait()
+
+	// Every host publishes once before the first task runs. Without
+	// this, hostvars during task 1 falls back to the inventory's view --
+	// so a play that gathers facts and then templates
+	// hostvars['h2']['ansible_system'] in its FIRST task saw nothing,
+	// which is exactly the shape the measurement used.
+	//
+	// After wg.Wait(), so every host's facts are in before any snapshot
+	// is taken, and sequential, so this needs no lock of its own.
+	for _, st := range ec.states {
+		ec.snapshotVars(st)
+	}
 }
 
 // runTaskList runs tasks in order across active hosts, recursing into
@@ -1606,6 +1632,15 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 	// fail, so ec.report can attribute ANY failure to the task that
 	// caused it — a when: that would not evaluate included.
 	st.currentTask = task
+	// hostvars, as of every host's last finished task. Refreshed HERE,
+	// by this host's own goroutine, so the Context stays
+	// single-goroutine; the snapshot published below is the only thing
+	// shared. See hostvars_live.go.
+	ec.refreshHostvars(st)
+	// And this host's own variables are published for the others once
+	// this task is done with them, which is what makes the refresh
+	// above see anything.
+	defer ec.snapshotVars(st)
 	scope := st.vc.Child()
 	scope.Set(vars.TaskVars, task.Vars)
 	// The directories a lookup resolves a relative file against. Real
