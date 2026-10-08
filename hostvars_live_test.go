@@ -81,16 +81,30 @@ func TestHostvarsSeesAnotherHostsGatheredFacts(t *testing.T) {
 	}
 }
 
-// Under free and host_pinned every host runs in its own goroutine, so
-// this is where a shared hostvars would race. Run with -race, which CI
-// does. It also pins that the feature works under all three schedulers
-// rather than only the default.
+// TestHostvarsAcrossStrategies exists for -race: under free and
+// host_pinned every host runs in its own goroutine, which is where a
+// shared hostvars would race.
+//
+// It deliberately does NOT assert the value under those two. ⛔ free
+// gives no cross-host ordering -- that is what it is FOR -- so h1 can
+// reach the reading task before h2 has finished the task that sets the
+// fact, and then <MISSING> is the correct answer. An earlier version
+// asserted mark-of-h2 for all three and passed on this machine, where
+// h2 always won the race; CI caught it on ppc64le under qemu, which is
+// slow enough to lose it. A test that depends on who wins a race passes
+// until it reaches a slower machine.
+//
+// linear has the per-task barrier, so the value IS guaranteed there, and
+// TestHostvarsSeesAnotherHostsSetFact asserts it.
 func TestHostvarsAcrossStrategies(t *testing.T) {
 	for _, strategy := range []string{"linear", "free", "host_pinned"} {
 		t.Run(strategy, func(t *testing.T) {
 			out := hostvarsRun(t, strategy, "{{ hostvars['h2']['my_mark'] | default('<MISSING>') }}", false)
-			if !strings.Contains(out, "GOT=mark-of-h2") {
-				t.Errorf("hostvars did not carry h2's fact under %s:\n%s", strategy, out)
+			switch {
+			case strategy == "linear" && !strings.Contains(out, "GOT=mark-of-h2"):
+				t.Errorf("linear has a per-task barrier, so h2's fact must be there:\n%s", out)
+			case !strings.Contains(out, "GOT=mark-of-h2") && !strings.Contains(out, "GOT=<MISSING>"):
+				t.Errorf("neither the fact nor a clean miss -- hostvars produced something else:\n%s", out)
 			}
 		})
 	}
