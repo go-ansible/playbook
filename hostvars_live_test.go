@@ -2,6 +2,8 @@ package playbook
 
 import (
 	"context"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -237,4 +239,81 @@ func sameMap(a, b map[string]any) bool {
 	_, ok := b["__probe"]
 	delete(a, "__probe")
 	return ok
+}
+
+// TestGroupByUpdatesGroupsAndGroupNames: group_by puts a host in a group
+// mid-play, so `groups` gains it and the host stops being "ungrouped".
+// Measured against ansible-core 2.21.4:
+//
+//	groups['tagged']  real: ['h1']   ours: <NO-GROUP>
+//	group_names       real: tagged   ours: ungrouped
+func TestGroupByUpdatesGroupsAndGroupNames(t *testing.T) {
+	e := New(twoLocalHosts(t))
+	var buf strings.Builder
+	e.Callbacks = []Callback{NewDefaultCallback(&buf, false)}
+	pb, err := Parse([]byte(`
+- name: p
+  hosts: h1
+  gather_facts: false
+  tasks:
+    - group_by: {key: tagged}
+    - debug: {msg: "GOT={{ groups['tagged'] | default('<NO-GROUP>') }} NAMES={{ group_names | sort | join(',') }}"}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.RunPlaybook(context.Background(), pb); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "GOT=['h1']") {
+		t.Errorf("groups did not gain the group_by group:\n%s", out)
+	}
+	if !strings.Contains(out, "NAMES=tagged") {
+		t.Errorf("group_names did not follow group_by:\n%s", out)
+	}
+}
+
+// TestEveryInventoryMutationBumpsTheGeneration reads engine.go and fails
+// if a call that MUTATES the inventory is not followed by invChanged().
+//
+// This is the check that would have caught the mistake it was written
+// after: the edit adding the lock and the bump to runGroupBy used the
+// wrong indentation, matched nothing, and changed no file -- so group_by
+// mutated the inventory and nothing told the cache. The symptom was a
+// group that did not exist, three layers away from the cause.
+//
+// A cache keyed on a counter is only as good as the places that bump it,
+// and those are a hand-kept set.
+func TestEveryInventoryMutationBumpsTheGeneration(t *testing.T) {
+	src, err := os.ReadFile("engine.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(src)
+	// The inventory's own mutating methods, from go-ansible/inventory.
+	mutators := regexp.MustCompile(`Inventory\.(AddHost|AddToGroup)\(`)
+	locs := mutators.FindAllStringIndex(text, -1)
+	if len(locs) == 0 {
+		t.Fatal("found no inventory mutations at all; the check is broken and a pass would mean nothing")
+	}
+	for _, loc := range locs {
+		// Look at the few lines that follow the call.
+		end := loc[1] + 220
+		if end > len(text) {
+			end = len(text)
+		}
+		if !strings.Contains(text[loc[1]:end], "invChanged()") {
+			t.Errorf("an inventory mutation at offset %d is not followed by invChanged(); "+
+				"groups/hostvars/group_names would keep a stale view:\n\t%s",
+				loc[0], firstLine(text[loc[0]:end]))
+		}
+	}
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }

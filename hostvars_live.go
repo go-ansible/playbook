@@ -70,6 +70,23 @@ func (ec *execCtx) refreshHostvars(st *hostState) {
 	groups, static := ec.inventoryView()
 	st.vc.SetVar(vars.Inventory, "groups", groups)
 	st.vc.SetVar(vars.Inventory, "hostvars", ec.liveHostvars(static))
+
+	// group_names is the third thing derived from the inventory, and
+	// group_by changes it mid-play: a host that joins a group stops
+	// being "ungrouped". Measured against ansible-core 2.21.4 after
+	// `group_by: {key: tagged}` --
+	//
+	//	real: tagged      ours: ungrouped
+	//
+	// It is read out of the view that was just built rather than asking
+	// the inventory again: hostvarsVar already computes magicHostVars
+	// for every host, so this costs a map lookup instead of another
+	// guarded read.
+	if hv, ok := static[st.name].(map[string]any); ok {
+		if names, ok := hv["group_names"]; ok {
+			st.vc.SetVar(vars.Inventory, "group_names", names)
+		}
+	}
 }
 
 // snapshotVars publishes this host's variables for the others to read.

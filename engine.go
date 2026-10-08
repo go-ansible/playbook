@@ -2648,7 +2648,10 @@ func (ec *execCtx) runGroupBy(args map[string]any, st *hostState) (modules.Resul
 	if key == "" {
 		return modules.Result{}, fmt.Errorf("group_by: missing required argument: key")
 	}
+	ec.invMu.Lock()
 	ec.engine.Inventory.AddToGroup(st.name, key)
+	ec.invMu.Unlock()
+	ec.invChanged()
 	return modules.Changed("added " + st.name + " to group " + key), nil
 }
 
