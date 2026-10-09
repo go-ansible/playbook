@@ -78,10 +78,16 @@ func untrustedKeys(vc *vars.Context) map[string]bool {
 		"hostvars": true,
 		"groups":   true,
 	}
-	for _, l := range []vars.Layer{vars.Facts, vars.Registered} {
-		for k := range vc.Layer(l) {
-			out[k] = true
-		}
+	// Per KEY, not per layer. The first version took the whole Facts
+	// and Registered layers, which is wrong in both directions:
+	// include_vars shares the Facts layer with set_fact, and real
+	// TEMPLATES an included vars file -- it is a file the author named.
+	// Measured: `include_vars` of `greeting: "Hello {{ who }}"` gives
+	// "Hello world" in real, and gave "Hello {{ who }}" here until this
+	// changed. Provenance belongs to the value, and vars.Context
+	// records it (v0.3.0).
+	for k := range vc.Untrusted() {
+		out[k] = true
 	}
 	return out
 }
@@ -271,4 +277,25 @@ func referencesUntrusted(v any, untrusted map[string]bool) bool {
 		}
 	}
 	return false
+}
+
+// setVarUntrusted stores a value that came from OUTSIDE this playbook --
+// a module's result, a gathered fact, a failed task's result -- and
+// records its provenance in the SAME statement.
+//
+// One call rather than two, because two drift: marking three obvious
+// entry points by hand left five other stores into the Registered layer
+// unmarked, and the proof of concept fired again immediately.
+// TestEveryUntrustedStoreIsMarked refuses a raw store into those layers
+// for the same reason.
+func setVarUntrusted(vc *vars.Context, layer vars.Layer, key string, value any) {
+	vc.SetVar(layer, key, value)
+	vc.MarkUntrusted(key)
+}
+
+// setMapUntrusted is setVarUntrusted for a whole map.
+func setMapUntrusted(vc *vars.Context, layer vars.Layer, vals map[string]any) {
+	for k, v := range vals {
+		setVarUntrusted(vc, layer, k, v)
+	}
 }

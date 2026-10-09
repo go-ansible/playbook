@@ -17,6 +17,8 @@ github.com/go-ansible/template v0.33.0 h1:qV8vBLJ1kUzRtGuTD25K2mamIpwI3mIyB+pyl5
 github.com/go-ansible/template v0.33.0/go.mod h1:SebAw7RKNIMBaRojuqJW+hOodbLrfjyulcWjV3s0kPo=
 github.com/go-ansible/vars v0.2.0 h1:NeOdU1bgjMSSYZaDhyCgN823F95SMCOpD0GsLPMN8QY=
 github.com/go-ansible/vars v0.2.0/go.mod h1:97mNnPwOMDSf4TzCGigSGLKQmrL6vCOfWFsfBytBftY=
+github.com/go-ansible/vars v0.3.0 h1:jjPFO/ZTZsZOVWQYXnmAmHURUQ3E0zumwBh+ArL67wY=
+github.com/go-ansible/vars v0.3.0/go.mod h1:97mNnPwOMDSf4TzCGigSGLKQmrL6vCOfWFsfBytBftY=
 github.com/go-ansible/vault v0.9.0 h1:o3zEXiEYjDNskRQMtRdqEMurFoIVfX+Z9Ibals2BtPg=
 github.com/go-ansible/vault v0.9.0/go.mod h1:4bdEuoF9PrxkHu8h6NpxIN4ZX51Gtyrqs5H3jGekQYY=
 github.com/go-encryptions/unixcrypt v0.2.0 h1:y7jPRn7D22dKkAS54XF+IndhCw0Vyf4uoEb2YZLroLg=

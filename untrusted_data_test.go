@@ -256,3 +256,83 @@ func TestQueryAndQAreTreatedAsLookups(t *testing.T) {
 		}
 	}
 }
+
+// TestIncludeVarsStillTemplates is the regression the first provenance
+// rule caused, and the reason provenance is now recorded per KEY rather
+// than per layer.
+//
+// include_vars shares the Facts layer with set_fact, so marking the whole
+// layer untrusted stopped an included file's templates from resolving:
+//
+//	real:  Hello world
+//	ours:  Hello {{ who }}
+//
+// Real TEMPLATES an included vars file, because it is a file the author
+// named. A security brake that breaks an ordinary, common pattern does
+// not survive contact with a real playbook.
+func TestIncludeVarsStillTemplates(t *testing.T) {
+	dir := t.TempDir()
+	varsFile := filepath.Join(dir, "benign.yml")
+	if err := os.WriteFile(varsFile, []byte("greeting: \"Hello {{ who }}\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := runPlaybookText(t, `
+- name: p
+  hosts: all
+  gather_facts: false
+  vars: {who: world}
+  tasks:
+    - include_vars: `+varsFile+`
+    - debug: {msg: "GOT={{ greeting }}"}
+`)
+	if !strings.Contains(out, "GOT=Hello world") {
+		t.Errorf("an included vars file stopped resolving its templates:\n%s", out)
+	}
+}
+
+// ...and a module result in the SAME layer is still untrusted, which is
+// the half the per-key rule exists to keep. Asserting only the test above
+// would pass just as well with the brake removed entirely.
+func TestAModuleResultInTheSameLayerIsStillUntrusted(t *testing.T) {
+	out := runPlaybookText(t, `
+- name: p
+  hosts: all
+  gather_facts: false
+  tasks:
+    - command: printf '%s' "{{ '{{' }} 7*7 {{ '}}' }}"
+      register: r
+    - set_fact: {f: "{{ r.stdout }}"}
+    - debug: {msg: "GOT={{ f }}"}
+`)
+	if !strings.Contains(out, "GOT={{ 7*7 }}") {
+		t.Errorf("a module result was evaluated although include_vars shares its layer:\n%s", out)
+	}
+}
+
+// An ABSOLUTE include_vars path is used as given. filepath.Join folds it
+// against BaseDir and silently drops the leading separator, so
+// `include_vars: /etc/site/vars.yml` looked for "etc/site/vars.yml"
+// beside the playbook. Found while writing the test above, which used an
+// absolute path in a t.TempDir() and failed for this reason rather than
+// the one it was written for. Measured: real reads the file.
+func TestIncludeVarsAcceptsAnAbsolutePath(t *testing.T) {
+	dir := t.TempDir()
+	varsFile := filepath.Join(dir, "abs.yml")
+	if err := os.WriteFile(varsFile, []byte("absvar: ok-abs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(varsFile) {
+		t.Fatalf("the fixture is not absolute (%s), so this test is not testing what it says", varsFile)
+	}
+	out := runPlaybookText(t, `
+- name: p
+  hosts: all
+  gather_facts: false
+  tasks:
+    - include_vars: `+varsFile+`
+    - debug: {msg: "GOT={{ absvar }}"}
+`)
+	if !strings.Contains(out, "GOT=ok-abs") {
+		t.Errorf("an absolute include_vars path did not resolve:\n%s", out)
+	}
+}
