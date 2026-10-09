@@ -11,12 +11,21 @@ permissions:
   contents: read
 
 env:
-  # go-ansible/template's tag lagged proxy.golang.org's per-version
-  # indexing when it was first published (see go-ansible/modules'
-  # CI for the details) — fetching straight from git sidesteps any
-  # repeat of that; go.sum still pins every module's content hash.
-  GOPROXY: direct
-  GOSUMDB: "off"
+  # go-ansible's freshly tagged modules can lag proxy.golang.org's
+  # per-version indexing by several minutes: @latest and @v/list
+  # resolve right away, while the versioned .info endpoint 404s for a
+  # while after. A proxy 404 makes the go command fall through to the
+  # NEXT GOPROXY entry, so naming `direct` after the proxy already
+  # covers that case -- without sending every THIRD-PARTY fetch
+  # straight at its origin, which is what put a golang.org 403
+  # rate-limit on the critical path and turned a qemu lane red.
+  GOPROXY: https://proxy.golang.org,direct
+  # Same-owner modules keep the direct path and skip the transparency
+  # log; go.sum still pins their content hash. Everything else is
+  # checked against that log again -- GOSUMDB: "off" had been
+  # disabling it for EVERY module, which is wider than the note above
+  # ever intended.
+  GOPRIVATE: github.com/go-ansible/*
 
 jobs:
   test:
