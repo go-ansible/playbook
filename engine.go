@@ -980,7 +980,8 @@ func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *Pla
 				mu.Unlock()
 				return
 			}
-			st.vc.Set(vars.Facts, vars.InjectFacts(gathered))
+			// ⛔ A gathered fact is whatever the target reported.
+			setMapUntrusted(st.vc, vars.Facts, vars.InjectFacts(gathered))
 			mu.Lock()
 			ec.report(pr, Result{Host: st.name, Task: gatheringFactsTask, Msg: "ok"})
 			mu.Unlock()
@@ -1189,9 +1190,9 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 			// block starts rescuing, which is why they are still
 			// readable in always: and after the block — measured, not
 			// assumed.
-			st.vc.SetVar(vars.Facts, "ansible_failed_task",
+			setVarUntrusted(st.vc, vars.Facts, "ansible_failed_task",
 				failedTaskDict(st.lastFailedTask, ec.play, resolvedConnection(ec.play, ec.engine.resolvedFor(st.vc))))
-			st.vc.SetVar(vars.Facts, "ansible_failed_result", st.lastFailedResult)
+			setVarUntrusted(st.vc, vars.Facts, "ansible_failed_result", st.lastFailedResult)
 		}
 		afterRescue := ec.runTaskList(ctx, task.Rescue, newlyFailed, pr)
 		rescueFailed := diff(newlyFailed, afterRescue)
@@ -1446,7 +1447,8 @@ func (ec *execCtx) runSingleTask(ctx context.Context, task Task, active []string
 		if task.Register != "" {
 			if regValue, ok := executor.vc.Get(task.Register); ok {
 				for _, h := range passthrough {
-					ec.states[h].vc.SetVar(vars.Registered, task.Register, regValue)
+					// ⛔ A module's result is data a managed host chose.
+					setVarUntrusted(ec.states[h].vc, vars.Registered, task.Register, regValue)
 				}
 			}
 		}
@@ -1781,7 +1783,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			},
 		})
 		if task.Register != "" {
-			st.vc.SetVar(vars.Registered, task.Register, map[string]any{
+			setVarUntrusted(st.vc, vars.Registered, task.Register, map[string]any{
 				"changed":        false,
 				"failed":         false,
 				"skipped":        true,
@@ -2085,7 +2087,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			// whole retry loop sets it for real, for subsequent tasks
 			// to see.
 			if task.Register != "" {
-				iter.SetVar(vars.Registered, task.Register, attemptView)
+				setVarUntrusted(iter, vars.Registered, task.Register, attemptView)
 				mergedVars = ec.engine.resolvedFor(iter)
 			}
 
@@ -2115,7 +2117,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				attemptView["retries"] = totalAttempts
 				attemptView["attempts"] = attempt + 1
 				if task.Register != "" {
-					iter.SetVar(vars.Registered, task.Register, attemptView)
+					setVarUntrusted(iter, vars.Registered, task.Register, attemptView)
 				}
 				select {
 				case <-ctx.Done():
@@ -2257,7 +2259,15 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			layer = vars.Facts
 		}
 		for k, v := range factVars {
-			st.vc.SetVar(layer, k, v)
+			setVarUntrusted(st.vc, layer, k, v)
+			// ⛔ set_fact's value and a module's returned facts alike.
+			// Marking set_fact loses nothing: its value has ALREADY been
+			// rendered once by renderArgs, so what is stored is final --
+			// and if what came back still looks like a template, it came
+			// from data, which is exactly what must not be rendered
+			// again. include_vars is NOT marked: it shares this layer,
+			// and real templates an author's vars file.
+			st.vc.MarkUntrusted(k)
 		}
 
 		// After the report, never before it: real prints the item that
@@ -2280,7 +2290,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		if loopResults == nil {
 			loopResults = []any{}
 		}
-		st.vc.SetVar(vars.Registered, task.Register, map[string]any{
+		setVarUntrusted(st.vc, vars.Registered, task.Register, map[string]any{
 			"changed": anyChanged,
 			"failed":  anyFailed,
 			"msg":     "All items completed",
@@ -2314,7 +2324,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 		if len(lastResult.Facts) > 0 {
 			regValue["ansible_facts"] = lastResult.Facts
 		}
-		st.vc.SetVar(vars.Registered, task.Register, regValue)
+		setVarUntrusted(st.vc, vars.Registered, task.Register, regValue)
 	}
 
 	if anyChanged {
@@ -2607,6 +2617,7 @@ func (ec *execCtx) runMeta(ctx context.Context, args map[string]any, st *hostSta
 		st.notify = map[int]bool{}
 		return nil
 	case "clear_facts":
+		// provenance: trusted -- an EMPTY map, nothing to record.
 		st.vc.Set(vars.Facts, map[string]any{})
 		return nil
 	default:
@@ -2665,13 +2676,26 @@ func (ec *execCtx) runIncludeVars(args map[string]any, st *hostState) (modules.R
 	if path == "" {
 		return modules.Result{}, fmt.Errorf("include_vars: missing required argument: file")
 	}
-	loaded, err := loadYAMLMap(filepath.Join(ec.engine.BaseDir, path), false, ec.engine.VaultPassword)
+	// An ABSOLUTE path is used as given. filepath.Join would fold it
+	// against BaseDir and silently drop its leading separator, so
+	// `include_vars: /etc/site/vars.yml` looked for
+	// "etc/site/vars.yml" beside the playbook. Real resolves an
+	// absolute path as absolute -- measured, it reads the file.
+	full := path
+	if !filepath.IsAbs(full) {
+		full = filepath.Join(ec.engine.BaseDir, full)
+	}
+	loaded, err := loadYAMLMap(full, false, ec.engine.VaultPassword)
 	if err != nil {
 		return modules.Result{}, fmt.Errorf("include_vars: %w", err)
 	}
 	// include_vars sits above play vars and role vars in real Ansible's
 	// ladder, not down with gathered facts.
 	for k, v := range loaded {
+		// provenance: trusted -- an author's OWN file, which real
+		// TEMPLATES. Marking it untrusted stopped
+		// `greeting: "Hello {{ who }}"` resolving: real gives
+		// "Hello world", and that version gave "Hello {{ who }}".
 		st.vc.SetVar(vars.Registered, k, v)
 	}
 	return modules.Ok("included " + path), nil
