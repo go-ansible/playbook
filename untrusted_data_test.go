@@ -164,3 +164,95 @@ func oneLocalHost(t *testing.T) *inventory.Inventory {
 	}
 	return inv
 }
+
+// ⛔ TestALookupResultIsNotTemplated is a SECOND source of untrusted
+// data, distinct from the variable layers, and the brake that keys on
+// untrusted NAMES could not see it:
+//
+//	vars:
+//	  from_file: "{{ lookup('file', 'data.txt') }}"
+//
+// names nothing untrusted, yet pulls a file's contents into a TRUSTED
+// variable. With that file holding `{{ lookup('pipe','touch X') }}`,
+// measured against ansible-core 2.21.4:
+//
+//	real:  GOT={{ lookup('pipe','touch X') }}   and no file
+//	ours:  GOT=                                 and THE FILE EXISTED
+//
+// Real is safe because it marks a lookup's RESULT unsafe. A lookup
+// returns a file's contents, a command's output, an API's answer -- data
+// by definition.
+func TestALookupResultIsNotTemplated(t *testing.T) {
+	dir := t.TempDir()
+	probe := filepath.Join(dir, "fired")
+	data := filepath.Join(dir, "data.txt")
+	if err := os.WriteFile(data, []byte("{{ lookup('pipe','touch "+probe+"') }}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := runPlaybookText(t, `
+- name: p
+  hosts: all
+  gather_facts: false
+  vars:
+    from_file: "{{ lookup('file', '`+data+`') }}"
+  tasks:
+    - debug: {msg: "GOT={{ from_file }}"}
+`)
+	if _, err := os.Stat(probe); err == nil {
+		t.Error("⛔ a file's contents were evaluated: a lookup's result was templated")
+	}
+	if !strings.Contains(out, "GOT={{ lookup(") {
+		t.Errorf("the file's contents did not come through literally:\n%s", out)
+	}
+}
+
+// The control that keeps the one above honest: an ORDINARY lookup still
+// resolves. Refusing to re-render a lookup's result must not stop the
+// lookup itself from running.
+func TestAnOrdinaryLookupStillResolves(t *testing.T) {
+	dir := t.TempDir()
+	data := filepath.Join(dir, "plain.txt")
+	if err := os.WriteFile(data, []byte("plain-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := runPlaybookText(t, `
+- name: p
+  hosts: all
+  gather_facts: false
+  vars:
+    c: "{{ lookup('file', '`+data+`') }}"
+  tasks:
+    - debug: {msg: "C={{ c }}"}
+`)
+	if !strings.Contains(out, "C=plain-content") {
+		t.Errorf("an ordinary lookup stopped working:\n%s", out)
+	}
+}
+
+// query() and q() are the same lookup machinery under other names, so
+// they carry the same rule. Asserting only `lookup` would leave two
+// spellings of the same hole open.
+func TestQueryAndQAreTreatedAsLookups(t *testing.T) {
+	for _, call := range []string{"query('file', '%s')", "q('file', '%s')"} {
+		dir := t.TempDir()
+		probe := filepath.Join(dir, "fired")
+		data := filepath.Join(dir, "data.txt")
+		if err := os.WriteFile(data, []byte("{{ lookup('pipe','touch "+probe+"') }}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		expr := strings.Replace(call, "%s", data, 1)
+		runPlaybookText(t, `
+- name: p
+  hosts: all
+  gather_facts: false
+  vars:
+    v: "{{ `+expr+` }}"
+  tasks:
+    - debug: {msg: "GOT={{ v }}"}
+`)
+		if _, err := os.Stat(probe); err == nil {
+			t.Errorf("⛔ %s did not get the lookup rule: a file's contents were evaluated", call)
+		}
+	}
+}

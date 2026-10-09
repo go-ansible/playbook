@@ -213,21 +213,43 @@ func mightBeTemplate(s string) bool {
 // identifier matches a bare name in a template expression.
 var identifier = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
 
+// lookupCall matches a call to one of the lookup globals. A lookup
+// RETURNS untrusted data -- a file's contents, a command's output, an
+// API's answer -- so a template that calls one produces a value that
+// must not be rendered again.
+//
+// ⛔ This is a SECOND source, distinct from the untrusted variable
+// layers, and the brake that keys on untrusted NAMES cannot see it:
+//
+//	vars:
+//	  from_file: "{{ lookup('file', 'data.txt') }}"
+//
+// names nothing untrusted, yet pulls a file's contents into a TRUSTED
+// variable. Measured against ansible-core 2.21.4 with a data.txt holding
+// `{{ lookup('pipe','touch FILE') }}`:
+//
+//	real:  GOT={{ lookup('pipe','touch FILE') }}   and no file
+//	ours:  GOT=                                    and THE FILE EXISTED
+//
+// Real is safe because it marks a lookup's result unsafe; this is the
+// same rule, at the only place a value is rendered twice.
+var lookupCall = regexp.MustCompile(`\b(lookup|query|q)\s*\(`)
+
 // referencesUntrusted reports whether v is (or contains) a template that
-// names a variable holding untrusted data.
+// names a variable holding untrusted data, or calls a lookup.
 //
 // It scans the identifiers in the template text rather than testing each
 // untrusted name against it: there can be hundreds of ansible_* facts,
 // and one pass over the text with a map lookup per word is cheap where
 // hundreds of substring searches would not be.
 func referencesUntrusted(v any, untrusted map[string]bool) bool {
-	if len(untrusted) == 0 {
-		return false
-	}
 	switch t := v.(type) {
 	case string:
 		if !template.IsTemplate(t) {
 			return false
+		}
+		if lookupCall.MatchString(t) {
+			return true
 		}
 		for _, word := range identifier.FindAllString(t, -1) {
 			if untrusted[word] {
