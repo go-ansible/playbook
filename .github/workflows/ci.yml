@@ -43,6 +43,20 @@ jobs:
         with:
           go-version: 1.27.2
       - run: go version
+      # gofmt REPORTS, it does not fail, so the check is its OUTPUT being
+      # empty. vet, build and test all pass on badly formatted code, so
+      # nothing else in this job is looking -- which is how a drifted file
+      # sat undetected on go-ansible/modules' main until an unrelated
+      # local `gofmt -l` turned it up. This repo is clean today; the gate
+      # is what keeps it that way.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"; echo "$unformatted"
+            gofmt -d $unformatted
+            exit 1
+          fi
       - run: go vet ./...
       - run: go build ./...
       # ansible-core is the REFERENCE this port is measured against, and the
