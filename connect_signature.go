@@ -31,6 +31,13 @@ var connectionVars = []string{
 	"ansible_user",
 	"playbook_dir",
 
+	// The route, not just the endpoint: a ProxyJump in either of these
+	// sends the same host:port through a different bastion, which is a
+	// different connection. Read in sshArgSettings, which
+	// TestConnectionVarsCoversDefaultConnect scans as well.
+	"ansible_ssh_common_args",
+	"ansible_ssh_extra_args",
+
 	// The WinRM arm has its own endpoint and credentials, and they
 	// decide a connection exactly as the SSH ones do. They were missing
 	// from the first version of this list, and the test below is what

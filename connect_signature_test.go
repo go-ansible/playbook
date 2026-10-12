@@ -167,6 +167,7 @@ func TestConnectionVarsCoversDefaultConnect(t *testing.T) {
 		{"connect.go", "DefaultConnect"},
 		{"connect_winrm.go", "dialWinRM"},
 		{"connect_winrm.go", "winrmConfigFor"},
+		{"connect_ssh_args.go", "sshArgSettings"},
 	} {
 		src, err := os.ReadFile(fn.file)
 		if err != nil {
