@@ -3928,17 +3928,19 @@ func magicHostVars(inv *inventory.Inventory, host string) map[string]any {
 // "all" and "ungrouped" among them. It is what a playbook reads to
 // write one host's config from the whole inventory —
 // `{{ groups['web'] }}`.
-func (e *Engine) groupsVar() map[string]any {
-	members := make(map[string][]string, len(e.Inventory.Groups))
-	for name := range e.Inventory.Groups {
+func (e *Engine) groupsVar() map[string]any { return groupsVarFor(e.Inventory) }
+
+func groupsVarFor(inv *inventory.Inventory) map[string]any {
+	members := make(map[string][]string, len(inv.Groups))
+	for name := range inv.Groups {
 		members[name] = nil
 	}
 	// Membership is TRANSITIVE: GroupsForHost walks the ancestry, so a
 	// host in web lands in "all" too — which is what makes
 	// groups['all'] the whole inventory while "all" itself lists no
 	// host directly.
-	for host := range e.Inventory.Hosts {
-		for _, g := range e.Inventory.GroupsForHost(host) {
+	for host := range inv.Hosts {
+		for _, g := range inv.GroupsForHost(host) {
 			members[g.Name] = append(members[g.Name], host)
 		}
 	}
@@ -3961,14 +3963,18 @@ func (e *Engine) groupsVar() map[string]any {
 // a hostvars entry that carried its own copy of hostvars would
 // recurse.
 func (e *Engine) hostvarsVar(groups map[string]any) map[string]any {
-	out := make(map[string]any, len(e.Inventory.Hosts))
-	for name := range e.Inventory.Hosts {
-		vars := e.Inventory.HostVars(name)
+	return hostvarsVarFor(e.Inventory, groups)
+}
+
+func hostvarsVarFor(inv *inventory.Inventory, groups map[string]any) map[string]any {
+	out := make(map[string]any, len(inv.Hosts))
+	for name := range inv.Hosts {
+		vars := inv.HostVars(name)
 		merged := make(map[string]any, len(vars)+4)
 		for k, v := range vars {
 			merged[k] = v
 		}
-		for k, v := range magicHostVars(e.Inventory, name) {
+		for k, v := range magicHostVars(inv, name) {
 			merged[k] = v
 		}
 		merged["groups"] = groups
