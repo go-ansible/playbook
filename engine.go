@@ -370,7 +370,7 @@ func (ec *execCtx) delegateConn(ctx context.Context, hostName string, hostVars m
 		ec.delegateConns[hostName] = st.conn
 		return st.conn, nil
 	}
-	conn, err := ec.engine.Connect(ctx, hostName, hostVars)
+	conn, err := ec.engine.connect(ctx, hostName, hostVars)
 	if err != nil {
 		return nil, err
 	}
@@ -949,7 +949,7 @@ func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *Pla
 			defer wg.Done()
 			release := ec.acquire()
 			defer release()
-			conn, err := e.Connect(ctx, st.name, withPlayConnection(play, e.resolvedFor(st.vc)))
+			conn, err := e.connect(ctx, st.name, withPlayConnection(play, e.resolvedFor(st.vc)))
 			if err != nil {
 				// Not reported here: a play that gathers no facts
 				// needs no connection yet, and real Ansible says
@@ -4044,7 +4044,7 @@ func (ec *execCtx) reconnect(ctx context.Context, st *hostState, task Task, sig 
 	// DefaultConnect already says "connecting to <host>" in its own
 	// error, so this does not say it again -- the first version produced
 	// "connecting to localhost: connecting to localhost: ...".
-	c, err := ec.engine.Connect(ctx, st.name, withTaskConnection(ec.play, task, vars))
+	c, err := ec.engine.connect(ctx, st.name, withTaskConnection(ec.play, task, vars))
 	if err != nil {
 		return nil, err
 	}

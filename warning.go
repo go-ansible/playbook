@@ -1,10 +1,13 @@
 package playbook
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"sync"
+
+	remoteexec "github.com/go-remoteexec/transport"
 )
 
 // Warner reports a non-fatal diagnostic — something the user should
@@ -61,3 +64,36 @@ func (e *Engine) warn(msg string) {
 
 // defaultWarner is what New installs: real's destination, stderr.
 func defaultWarner() Warner { return NewWarner(os.Stderr) }
+
+// warnerKey carries the Engine's Warner to its Connector through ctx.
+//
+// A Connector is a plain function of (ctx, hostName, hostVars), and it
+// is the one that sees the connection variables worth warning about --
+// an OpenSSH option in ansible_ssh_common_args that this port ignores.
+// Widening the Connector type to take a Warner would break every caller
+// who replaced Engine.Connect; ctx already reaches all of them, and a
+// custom Connector that wraps DefaultConnect passes it along unchanged.
+//
+// DefaultConnect called directly, outside an Engine, finds none and
+// warns nobody -- which is what a nil Engine.Warn means too.
+type warnerKey struct{}
+
+func withWarner(ctx context.Context, w Warner) context.Context {
+	if w == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, warnerKey{}, w)
+}
+
+func warnerFrom(ctx context.Context) Warner {
+	w, _ := ctx.Value(warnerKey{}).(Warner)
+	return w
+}
+
+// connect is Engine.Connect with the Engine's Warner in ctx. Every dial
+// the engine makes goes through here, so a warning raised while
+// building a connection lands in the same deduplicated stream as the
+// rest of the run's.
+func (e *Engine) connect(ctx context.Context, hostName string, hostVars map[string]any) (remoteexec.Connection, error) {
+	return e.Connect(withWarner(ctx, e.Warn), hostName, hostVars)
+}

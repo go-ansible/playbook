@@ -25,10 +25,39 @@ type Connector func(ctx context.Context, hostName string, hostVars map[string]an
 // to be smart about), ansible_host, ansible_port (default 22),
 // ansible_user, ansible_password / ansible_ssh_pass,
 // ansible_ssh_private_key_file, ansible_host_key_checking,
-// ansible_ssh_timeout. ansible_ssh_common_args is not implemented
-// (OpenSSH-specific flags have no equivalent in a Go SSH client).
-// "localhost"/"127.0.0.1" (by hostName, unless ansible_connection
-// overrides it) use Local.
+// ansible_ssh_timeout. "localhost"/"127.0.0.1" (by hostName, unless
+// ansible_connection overrides it) use Local.
+//
+// ansible_ssh_common_args and ansible_ssh_extra_args (and
+// ANSIBLE_SSH_COMMON_ARGS / ANSIBLE_SSH_EXTRA_ARGS, and ansible.cfg's
+// [ssh_connection] ssh_common_args / ssh_extra_args, on the plugin's own
+// host var > env > ini precedence) are read for ONE thing: a jump host,
+// given as `-o ProxyJump=[user@]host[:port][,...]` or `-J ...` -- see
+// sshProxyJumpFor for the grammar and for which value wins. Every other
+// OpenSSH option in them is still ignored, because most have no
+// equivalent in a Go SSH client, but each one now produces a warning
+// through the Engine's Warner instead of being dropped without a word.
+//
+// A jump host is not configured the way OpenSSH would configure it,
+// and the differences are deliberate, so they are listed:
+//
+//   - User: the spec's, else the LOCAL user -- OpenSSH's fallback,
+//     never ansible_user. ~/.ssh/config is not read, so a `Host
+//     bastion` block's User/Port/IdentityFile is not honoured (a gap).
+//   - Credentials: the target's own -- the same private key file,
+//     password or agent. ssh(1) says command-line configuration
+//     "generally appl[ies] to the destination host and not any
+//     specified jump hosts", so with real the bastion authenticates
+//     with whatever ~/.ssh/config and the agent give it. Without
+//     ssh_config to read, the target's credentials are the only ones
+//     an inventory has given, and they are the ones that work for the
+//     usual one-key-everywhere setup.
+//   - Host keys: checked exactly as the target's are --
+//     ansible_host_key_checking applies to the bastion too, against
+//     the bastion's own host:port in known_hosts, and the target is
+//     checked against its own name, not the bastion's.
+//   - ansible_ssh_timeout bounds the TCP connection to the first jump
+//     host, the only connection this machine makes.
 //
 // Three of these settings — remote_user, host_key_checking, timeout —
 // match real Ansible's own config precedence: an inventory/host var
@@ -39,10 +68,14 @@ type Connector func(ctx context.Context, hostName string, hostVars map[string]an
 // host-var layer — see Engine.Forks/ConfigDefaults — since it's a
 // global concurrency cap, not a per-host connection detail, so it
 // doesn't belong in this function's own resolution chain.) These four
-// settings are the full extent of this port's ansible.cfg support — no
-// other section or key is read at all (a real, stated gap — see
-// go-ansible/cli's ansible-config, which reports exactly this
-// precedence and these four settings, nothing more). Unlike real
+// settings are the full extent of this port's ansible.cfg support for
+// connections, apart from [ssh_connection]'s ssh_common_args and
+// ssh_extra_args above, which are read for ProxyJump alone (a real,
+// stated gap — see go-ansible/cli's ansible-config, which reports
+// exactly this precedence and these four settings; the two
+// [ssh_connection] keys are connection-PLUGIN settings, which real's
+// `ansible-config dump` leaves out unless asked with `-t connection`,
+// so they are not added to ConfigDefaults either). Unlike real
 // Ansible's lenient boolean parsing (yes/no/on/off/1/0/true/false,
 // case-insensitive), ANSIBLE_HOST_KEY_CHECKING here is parsed with
 // Go's strconv.ParseBool (true/false/1/0/t/f, case-sensitive on the
@@ -90,6 +123,16 @@ func DefaultConnect(ctx context.Context, hostName string, hostVars map[string]an
 	if cfg.PrivateKeyFile == "" && cfg.Password == "" {
 		cfg.UseAgent = true
 	}
+	hops, warnings, err := sshProxyJumpFor(hostVars)
+	if err != nil {
+		return nil, fmt.Errorf("connecting to %s: %w", hostName, err)
+	}
+	if warn := warnerFrom(ctx); warn != nil {
+		for _, msg := range warnings {
+			warn(msg)
+		}
+	}
+	cfg.ProxyJump = hops
 	conn, err := remoteexec.DialSSH(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to %s: %w", hostName, err)
