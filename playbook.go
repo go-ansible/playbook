@@ -508,6 +508,11 @@ var playReservedKeys = map[string]bool{
 }
 
 func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
+	// Before anything is read: a key real would refuse is a typo, and
+	// silently dropping it changes what the play does.
+	if err := checkPlayKeywords(m, str(m["name"])); err != nil {
+		return Play{}, err
+	}
 	p := Play{
 		Name:              str(m["name"]),
 		Hosts:             str(m["hosts"]),
