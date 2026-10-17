@@ -29,17 +29,24 @@ type Play struct {
 	GatherFacts bool // default true
 	// FactPath is real's fact_path: the directory whose *.fact files
 	// become ansible_local. Honoured through facts.Options.
-	FactPath     string
-	Become       bool
-	BecomeUser   string
-	BecomeMethod string
-	BecomeExe    string // become_exe: the escalation program to run
-	BecomeFlags  string // become_flags: REPLACES the method's own default flags
-	Vars         map[string]any
-	VarsFiles    []string // paths, resolved relative to the playbook's directory
-	Tasks        []Task
-	Handlers     []Task
-	Tags         []string
+	FactPath string
+
+	// ForceHandlers is real's force_handlers, and it is a POINTER
+	// because the keyword overrides the --force-handlers flag in BOTH
+	// directions: measured, `force_handlers: false` with
+	// --force-handlers on the command line does not run the handler.
+	// A plain bool could not tell "false" from "not set".
+	ForceHandlers *bool
+	Become        bool
+	BecomeUser    string
+	BecomeMethod  string
+	BecomeExe     string // become_exe: the escalation program to run
+	BecomeFlags   string // become_flags: REPLACES the method's own default flags
+	Vars          map[string]any
+	VarsFiles     []string // paths, resolved relative to the playbook's directory
+	Tasks         []Task
+	Handlers      []Task
+	Tags          []string
 	// Serial is the rolling-update batch sizes. Each entry is either a
 	// plain count ("2") or a percentage of the play's TOTAL host count
 	// ("50%"); a list gives successive batch sizes, whose last entry
@@ -521,6 +528,7 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 		Hosts:             str(m["hosts"]),
 		GatherFacts:       boolDefault(m["gather_facts"], true),
 		FactPath:          str(m["fact_path"]),
+		ForceHandlers:     toBoolPtr(m["force_handlers"]),
 		Become:            boolDefault(m["become"], false),
 		BecomeUser:        strDefault(m["become_user"], "root"),
 		BecomeMethod:      strDefault(m["become_method"], "sudo"),

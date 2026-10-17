@@ -3086,12 +3086,26 @@ func (ec *execCtx) handlersFor(name string) []int {
 	return out
 }
 
+// forceHandlers resolves real's two sources for it. The play keyword
+// wins over the --force-handlers flag in BOTH directions -- measured
+// against ansible-core 2.21.4: `force_handlers: false` with
+// --force-handlers given still does not run the handler, and
+// `force_handlers: true` with no flag does. Real spells this as a
+// NonInheritableFieldAttribute whose default comes from cliargs, which
+// is the same rule.
+func (ec *execCtx) forceHandlers() bool {
+	if ec.play.ForceHandlers != nil {
+		return *ec.play.ForceHandlers
+	}
+	return ec.engine.ForceHandlers
+}
+
 func (ec *execCtx) runHandlers(ctx context.Context, order []string, pr *PlayResult) {
 	for i, handler := range ec.play.Handlers {
 		var toRun []string
 		for _, h := range order {
 			st := ec.states[h]
-			if (!st.isFailed() || ec.engine.ForceHandlers) && st.notify[i] {
+			if (!st.isFailed() || ec.forceHandlers()) && st.notify[i] {
 				toRun = append(toRun, h)
 			}
 		}
