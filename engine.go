@@ -972,7 +972,11 @@ func (ec *execCtx) connectAndGatherFacts(ctx context.Context, play Play, pr *Pla
 			if !play.GatherFacts {
 				return
 			}
-			gathered, err := facts.Gather(ctx, conn)
+			// fact_path reaches the gatherer: the facts package has
+			// implemented it all along (the directory's *.fact files come
+			// back as ansible_local), and this call discarded the play's
+			// setting by using the defaults-only Gather.
+			gathered, err := facts.GatherWith(ctx, conn, facts.Options{FactPath: play.FactPath})
 			if err != nil {
 				mu.Lock()
 				st.setFailed(true)

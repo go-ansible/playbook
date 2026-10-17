@@ -24,9 +24,12 @@ type Playbook []Play
 
 // Play runs a set of tasks against a pattern of inventory hosts.
 type Play struct {
-	Name         string
-	Hosts        string
-	GatherFacts  bool // default true
+	Name        string
+	Hosts       string
+	GatherFacts bool // default true
+	// FactPath is real's fact_path: the directory whose *.fact files
+	// become ansible_local. Honoured through facts.Options.
+	FactPath     string
 	Become       bool
 	BecomeUser   string
 	BecomeMethod string
@@ -517,6 +520,7 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 		Name:              str(m["name"]),
 		Hosts:             str(m["hosts"]),
 		GatherFacts:       boolDefault(m["gather_facts"], true),
+		FactPath:          str(m["fact_path"]),
 		Become:            boolDefault(m["become"], false),
 		BecomeUser:        strDefault(m["become_user"], "root"),
 		BecomeMethod:      strDefault(m["become_method"], "sudo"),
