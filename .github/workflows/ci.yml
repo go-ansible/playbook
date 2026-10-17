@@ -68,8 +68,27 @@ jobs:
       # against (comments in the source name it), so the judge is pinned to it
       # rather than to whatever is newest. A conformance oracle that moves on
       # its own is not an oracle.
+      # ansible-core 2.21.4 declares Requires-Python >=3.12 with NO upper
+      # bound and classifies 3.12, 3.13 and 3.14 only. pip therefore
+      # installs it happily on 3.15, where it then fails at RUN time --
+      # which is what happened when the macOS image moved 3.14.7 ->
+      # 3.15.0: every interop test reported "real ansible-playbook
+      # exit = 1", the oracle was broken, and nothing said so. Pinning
+      # the interpreter is half the fix.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
       - name: ansible-core, the reference this port must match
-        run: pipx install ansible-core==2.21.4
+        run: |
+          pipx install --python "$(which python)" ansible-core==2.21.4
+          ansible --version
+          # The other half, and the part that survives the next move: a
+          # reference that INSTALLED is not a reference that RUNS. This
+          # fails the job here, where the cause is one line away, rather
+          # than as a dozen interop tests reporting someone else's
+          # exit 1.
+          ansible -i 'localhost,' -c local localhost -m ping \
+            || { echo "::error::ansible-core installed but will not run on this interpreter"; exit 1; }
 
       - name: Test
         env:
