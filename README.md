@@ -34,7 +34,13 @@ and `include_vars`.
 
 `Connect` reaches a host over `local`, `ssh` or `winrm` —
 `ansible_connection: winrm` speaks WS-Management to a Windows target, using
-the real plugin's own `ansible_winrm_*` variables.
+the real plugin's own `ansible_winrm_*` variables. A host behind a bastion
+is reached the way real inventories already say it: `-o ProxyJump=...` or
+`-J ...` in `ansible_ssh_common_args` / `ansible_ssh_extra_args` (or their
+`ANSIBLE_SSH_*` and `[ssh_connection]` spellings). That is the only thing
+read from those arguments; any other OpenSSH option in them is ignored
+with a warning, and `~/.ssh/config` is not read at all — see
+`DefaultConnect` for exactly how a jump host is configured.
 
 A handful of task keywords are still refused by name rather than ignored
 (`connection`/`remote_user`/`port` at task level, `collections`,

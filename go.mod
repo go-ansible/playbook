@@ -10,6 +10,7 @@ require (
 	github.com/go-ansible/vars v0.3.1
 	github.com/go-ansible/vault v0.9.2
 	github.com/go-remoteexec/transport v0.5.0
+	golang.org/x/crypto v0.58.0
 )
 
 require (
@@ -23,7 +24,6 @@ require (
 	github.com/nikolalohinski/gonja/v2 v2.9.1 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
-	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
