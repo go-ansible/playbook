@@ -2456,7 +2456,7 @@ func (ec *execCtx) runDirective(ctx context.Context, task Task, st *hostState, a
 		r, e := ec.runIncludeVars(args, st)
 		return r, true, e
 	case "assert":
-		r, e := ec.runAssert(args, st)
+		r, e := ec.runAssert(args, mergedVars)
 		return r, true, e
 	case "debug":
 		// Only the var: form needs the engine. `var` names a variable to
@@ -2520,7 +2520,32 @@ func (ec *execCtx) runDebugVar(name string, merged map[string]any) modules.Resul
 // boolean" while running fine on real ansible-core. A condition is
 // evaluated the same way `when:` is, since real Ansible evaluates both
 // through the same templar.
-func (ec *execCtx) runAssert(args map[string]any, st *hostState) (modules.Result, error) {
+//
+// And against the same VARIABLES `when:` sees. vars is the caller's
+// mergedVars: the per-iteration scope (resolvedFor(iter)) that when:,
+// changed_when:, failed_when:, until:, break_when:, `debug: var:` and
+// the rendering of fail_msg/success_msg already use. On a looped task
+// it carries the loop variable under its loop_control.loop_var name,
+// ansible_loop_var, index_var and ansible_index_var when asked for,
+// and ansible_loop under extended: true; on any task it also carries
+// the task's own `vars:`, ansible_search_path and role_path.
+//
+// This used to take the hostState and evaluate against
+// resolvedFor(st.vc) -- the HOST's scope, one level above all of that.
+// So `that: item > 0` in a loop failed every item with "'item' is
+// undefined" while the same task's fail_msg, rendered from mergedVars,
+// printed the item just fine (go-ansible/playbook#196). Real's assert
+// action plugin evaluates `that` against the task vars it is handed,
+// which include the loop variable; that is from reading
+// lib/ansible/plugins/action/assert.py and the loops documentation,
+// not from a side-by-side run.
+//
+// A side effect worth stating: a NON-looped assert now sees the task's
+// own `vars:` as well, which it did not before. Everything it could see
+// before (play vars, host and group vars, facts, registered results,
+// set_fact) is still in this scope, because the task scope is a child
+// of the host's and only adds layers.
+func (ec *execCtx) runAssert(args map[string]any, vars map[string]any) (modules.Result, error) {
 	raw, ok := args["that"]
 	if !ok {
 		return modules.Fail("assert: missing required argument: that"), nil
@@ -2530,7 +2555,6 @@ func (ec *execCtx) runAssert(args map[string]any, st *hostState) (modules.Result
 		conditions = []any{raw}
 	}
 
-	vars := ec.engine.resolvedFor(st.vc)
 	for _, cond := range conditions {
 		truthy, err := ec.evalCondition(cond, vars)
 		if err != nil {
