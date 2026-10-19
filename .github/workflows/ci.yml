@@ -77,7 +77,7 @@ jobs:
       # the interpreter is half the fix.
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.14'
+          python-version: '3.15'
       - name: ansible-core, the reference this port must match
         run: |
           pipx install --python "$(which python)" ansible-core==2.21.4
