@@ -36,6 +36,37 @@ and `include_vars`.
 `ansible_connection: winrm` speaks WS-Management to a Windows target, using
 the real plugin's own `ansible_winrm_*` variables.
 
+## Migrating an old playbook
+
+`CompatScan` reports the constructs in a playbook source that no current
+Ansible will run — the reference's or this one's — and says what to write
+instead:
+
+```go
+findings, err := playbook.CompatScan(data)
+for _, f := range findings {
+    fmt.Println(f) // 4:3: play keyword "sudo": use `become: true`
+}
+```
+
+It works on sources that do **not** parse, which is the point: a playbook
+carrying `sudo:` is refused by both implementations, so a report needing a
+parsed playbook would be silent in the one case it is for. The reference's
+own diagnosis names the symptom only — measured against ansible-core
+2.21.4, `sudo:` on a task exits 4 with `conflicting action statements:
+debug, sudo`, which does not hint that `sudo` was ever a keyword.
+
+Every keyword in the table was measured to be refused by the reference
+rather than taken from a changelog, and the test that measures them
+carries its own control. What the table deliberately does not claim is the
+version each one went away in: the reference does not ship that history.
+
+A module name is *not* a compatibility problem here. The 2.10 split that
+moved modules out of core is invisible to this port, because the registry
+is keyed by short name: a 2.9-era `ufw:` resolves exactly as
+`community.general.ufw` does. A name that does not resolve is one this
+port has not ported yet.
+
 A handful of task keywords are still refused by name rather than ignored
 (`connection`/`remote_user`/`port` at task level, `collections`,
 `delegate_facts`, `debugger`, and any strategy other than those two) — see
