@@ -132,6 +132,22 @@ func CompatScan(src []byte) ([]CompatFinding, error) {
 	return s.findings, nil
 }
 
+// CompatScanFile is CompatScan on the playbook at path, decrypting it
+// first when it is vault-encrypted. An empty password behaves like
+// ParseFile.
+//
+// It exists because the CLI has a path, not bytes, and a vault-encrypted
+// playbook is exactly as likely to be an old one: reading it with
+// os.ReadFile would hand the scan a header line and a wall of base64,
+// and the report would be "this is not YAML" for a playbook that is.
+func CompatScanFile(path, vaultPassword string) ([]CompatFinding, error) {
+	data, err := readMaybeEncrypted(path, vaultPassword)
+	if err != nil {
+		return nil, err
+	}
+	return CompatScan(data)
+}
+
 type compatScan struct {
 	findings []CompatFinding
 	// seen records where each key inside a task mapping was written, so

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/go-ansible/modules"
+	"github.com/go-ansible/vault"
 )
 
 const modernPlaybook = `
@@ -162,6 +163,44 @@ func TestModuleAdviceDoesNotPromiseAFlagItCannotKeep(t *testing.T) {
 	}
 	if !strings.Contains(advice, "coverage") {
 		t.Errorf("advice %q should say plainly that this is missing coverage", advice)
+	}
+}
+
+// TestCompatScanFileReadsAVaultedPlaybook holds the reason
+// CompatScanFile exists at all: an old playbook is as likely to be
+// vault-encrypted as any other, and a plain os.ReadFile would hand the
+// scan a header line and a wall of base64. The plaintext half is the
+// control — without it, a vaulted scan that silently found nothing
+// would be indistinguishable from one that worked.
+func TestCompatScanFileReadsAVaultedPlaybook(t *testing.T) {
+	dir := t.TempDir()
+
+	plain := filepath.Join(dir, "plain.yml")
+	if err := os.WriteFile(plain, []byte(oldPlaybook), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clear, err := CompatScanFile(plain, "")
+	if err != nil {
+		t.Fatalf("plaintext: %v", err)
+	}
+	if len(clear) != 3 {
+		t.Fatalf("control failed: plaintext scan found %d findings, want 3: %v", len(clear), clear)
+	}
+
+	enc, err := vault.Encrypt([]byte(oldPlaybook), "pw", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vaulted := filepath.Join(dir, "vaulted.yml")
+	if err := os.WriteFile(vaulted, []byte(enc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := CompatScanFile(vaulted, "pw")
+	if err != nil {
+		t.Fatalf("vaulted: %v", err)
+	}
+	if len(got) != len(clear) {
+		t.Errorf("vaulted scan found %d findings, plaintext found %d: %v", len(got), len(clear), got)
 	}
 }
 
