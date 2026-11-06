@@ -81,6 +81,43 @@ func TestRedfishBackendIsTemplated(t *testing.T) {
 	}
 }
 
+// An undefined variable inside the value fails the task with a message
+// naming goansible_redfish_backend, before the module runs.
+func TestRedfishBackendUndefinedFailsTheTask(t *testing.T) {
+	pb, err := Parse([]byte(play(`vars: {goansible_redfish_backend: "{{ nosuchvar }}"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(localhostInventory())
+	ran := false
+	reg := modules.Default()
+	reg.Register("redfish_info", func(context.Context, remoteexec.Connection, map[string]any) (modules.Result, error) {
+		ran = true
+		return modules.Ok("captured"), nil
+	})
+	reg.Register("control_module", func(context.Context, remoteexec.Connection, map[string]any) (modules.Result, error) {
+		return modules.Ok("captured"), nil
+	})
+	e.Modules = reg
+	res, _ := e.RunPlaybook(context.Background(), pb)
+	if ran {
+		t.Error("the module ran with an untemplatable backend value")
+	}
+	found := false
+	if res != nil {
+		for _, p := range res.Plays {
+			for _, r := range p.Results {
+				if r.Failed && strings.Contains(r.Msg, RedfishBackendVar) {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no failed result naming %s", RedfishBackendVar)
+	}
+}
+
 // The control: with no variable the module receives no key at all, so the
 // default path (redfishtool on the target) is exactly yesterday's.
 func TestRedfishBackendAbsentByDefault(t *testing.T) {
