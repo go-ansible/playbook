@@ -16,20 +16,16 @@ import "github.com/go-ansible/modules"
 // real refuses an argument outside the module's argument_spec.
 const RedfishBackendVar = "goansible_redfish_backend"
 
-var redfishBackendModules = map[string]bool{
-	"redfish_info":    true,
-	"redfish_command": true,
-	"redfish_config":  true,
-}
-
 // redfishBackendFor returns the value of RedfishBackendVar to hand to the
-// task's module, and false when there is nothing to hand: the module is
-// not one of the three, the variable is unset, or the task's own args
+// task's module, and false when there is nothing to hand: the module does
+// not read the key (modules.AcceptsRedfishBackend decides, next to the code
+// that reads it, so no list here can go stale when a module learns the
+// key), the variable is unset, or the task's own args
 // already name a backend (the narrower statement wins). The value is
 // passed as written; the module refuses anything but its known backends,
 // so a typo fails the task instead of silently choosing the other network.
 func redfishBackendFor(module string, vars, args map[string]any) (any, bool) {
-	if !redfishBackendModules[modules.NormalizeName(module)] {
+	if !modules.AcceptsRedfishBackend(module) {
 		return nil, false
 	}
 	if _, set := args[modules.RedfishBackendKey]; set {
