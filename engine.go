@@ -1995,6 +1995,14 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				if ec.diffFor(task) && args != nil {
 					args[modules.DiffModeKey] = true
 				}
+				if v, ok := redfishBackendFor(task.Module, mergedVars, args); ok && args != nil {
+					// A value that fails to template is passed as written;
+					// the module then refuses it by name.
+					if rendered, err := ec.engine.Template.RenderValue(v, mergedVars); err == nil {
+						v = rendered
+					}
+					args[modules.RedfishBackendKey] = v
+				}
 				if env := ec.taskEnvironment(task, mergedVars); len(env) > 0 && args != nil {
 					args[modules.EnvironmentKey] = env
 				}
