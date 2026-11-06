@@ -1995,10 +1995,28 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				if ec.diffFor(task) && args != nil {
 					args[modules.DiffModeKey] = true
 				}
+				var backendErr error
+				if v, ok := redfishBackendFor(task.Module, mergedVars, args); ok && args != nil {
+					// A value that fails to template fails the TASK, as an
+					// undefined variable in its args would, before the
+					// module runs. Passing the raw "{{ ... }}" on would
+					// also be refused (by the module, by name), but later
+					// and with a message about a value, not about the
+					// variable the operator has to fix. Real Ansible has
+					// no such variable and never evaluates it, so there is
+					// no real wording to copy: the message names ours.
+					if rendered, err := ec.engine.Template.RenderValue(v, mergedVars); err != nil {
+						backendErr = fmt.Errorf("%s: %w", RedfishBackendVar, innermost(err))
+					} else {
+						args[modules.RedfishBackendKey] = rendered
+					}
+				}
 				if env := ec.taskEnvironment(task, mergedVars); len(env) > 0 && args != nil {
 					args[modules.EnvironmentKey] = env
 				}
-				if skip, res := ec.checkModeGate(task, args); skip {
+				if backendErr != nil {
+					result = modules.Fail(backendErr.Error())
+				} else if skip, res := ec.checkModeGate(task, args); skip {
 					result = res
 				} else if task.Async > 0 {
 					result = ec.runAsyncTask(ctx, task, conn, args)
