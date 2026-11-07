@@ -150,6 +150,11 @@ type VarPrompt struct {
 type RoleRef struct {
 	Name string
 	Vars map[string]any
+
+	// When and Tags are the `when:`/`tags:` an entry in `roles:` may
+	// carry. Both were parsed and thrown away before #192.
+	When string
+	Tags []string
 }
 
 // Task is one step of a play (or of a block's body/rescue/always).
@@ -1453,6 +1458,14 @@ func parseRoleRef(v any) (RoleRef, error) {
 		if len(vars) > 0 {
 			ref.Vars = vars
 		}
+		// `when:` and `tags:` on a roles entry were recognised here only
+		// to be DROPPED -- the switch above skipped them so they would not
+		// land in the role's vars, and nothing then read them, so a role
+		// written with either ran unconditionally and untagged
+		// (go-ansible/playbook#192). They are kept now and applied to the
+		// role's synthetic block task; see roleTask.
+		ref.When = str(r["when"])
+		ref.Tags = toStringList(r["tags"])
 		return ref, nil
 	default:
 		return RoleRef{}, fmt.Errorf("unsupported roles: entry type %T", v)
@@ -1498,9 +1511,25 @@ func roleTask(ctx parseCtx, ref RoleRef) (Task, error) {
 	}
 	block = append(block, role.Tasks...)
 
+	// The entry's own when:/tags: ride on the synthetic block. runBlock
+	// already gates a whole block on its When -- block, rescue and always
+	// alike -- and propagateTags already recurses into Block, so the
+	// keywords need no new machinery, only somewhere to land.
+	//
+	// ⚠ Divergence in the REPORTING, not the outcome: real inherits a
+	// role's conditional down its dep chain and evaluates it per TASK
+	// (playbook/role/__init__.py:619-627 — "tasks know by which route they
+	// were found, and can correctly take their parent's tags/conditionals
+	// into account"), so a skipped role shows one skipped line per task.
+	// This gates once and reports one skip for the role. The same
+	// difference already applies to a literal `block:`'s own when in this
+	// engine, so the role case is consistent with it rather than with
+	// real.
 	t := Task{
 		Name:         "role: " + ref.Name,
 		Block:        block,
+		When:         ref.When,
+		Tags:         ref.Tags,
 		RoleDefaults: role.Defaults,
 		RoleVars:     mergedRoleVars(role.Vars, ref.Vars),
 		RoleDir:      role.Dir,
