@@ -2508,7 +2508,7 @@ func (ec *execCtx) runDirective(ctx context.Context, task Task, st *hostState, a
 		r, e := ec.runIncludeVars(args, st)
 		return r, true, e
 	case "assert":
-		r, e := ec.runAssert(args, st)
+		r, e := ec.runAssert(args, mergedVars)
 		return r, true, e
 	case "debug":
 		// Only the var: form needs the engine. `var` names a variable to
@@ -2572,7 +2572,16 @@ func (ec *execCtx) runDebugVar(name string, merged map[string]any) modules.Resul
 // boolean" while running fine on real ansible-core. A condition is
 // evaluated the same way `when:` is, since real Ansible evaluates both
 // through the same templar.
-func (ec *execCtx) runAssert(args map[string]any, st *hostState) (modules.Result, error) {
+// runAssert evaluates `that`, using the vars the TASK was resolved with
+// rather than the host's own context.
+//
+// It used to do its own `ec.engine.resolvedFor(st.vc)`, which reaches past
+// the per-item scope a loop runs each iteration in -- so `item` was
+// undefined inside `that:` and an assertion about the item could not be
+// written at all (go-ansible/playbook#196). mergedVars is what every other
+// keyword on the task is evaluated against, `when:` and `failed_when:`
+// included, so it is what `that:` should see too.
+func (ec *execCtx) runAssert(args map[string]any, mergedVars map[string]any) (modules.Result, error) {
 	raw, ok := args["that"]
 	if !ok {
 		return modules.Fail("assert: missing required argument: that"), nil
@@ -2582,9 +2591,8 @@ func (ec *execCtx) runAssert(args map[string]any, st *hostState) (modules.Result
 		conditions = []any{raw}
 	}
 
-	vars := ec.engine.resolvedFor(st.vc)
 	for _, cond := range conditions {
-		truthy, err := ec.evalCondition(cond, vars)
+		truthy, err := ec.evalCondition(cond, mergedVars)
 		if err != nil {
 			return modules.Fail(conditionalFailure("", err)), nil
 		}
