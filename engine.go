@@ -1962,6 +1962,10 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				}
 			}
 			if !handled && st.conn == nil && st.connErr != nil &&
+				// wait_for_connection is exempt: a cached connection failure is
+				// the NORMAL state when it starts, and reporting UNREACHABLE
+				// instead of waiting is #195. It retries in connectWaiting.
+				modules.NormalizeName(task.Module) != "wait_for_connection" &&
 				!connectionlessModules[modules.NormalizeName(task.Module)] && task.DelegateTo == "" {
 				// The host has no connection and this task needs one.
 				// Real Ansible re-attempts the connection for every
@@ -1974,7 +1978,16 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				return false
 			}
 			if !handled {
-				conn, dname, cerr := ec.connectionFor(ctx, task, mergedVars, st)
+				// wait_for_connection dials until its own timeout instead
+				// of ending on the first refusal -- real does that on the
+				// controller, in its action plugin. See connectWaiting.
+				connect := ec.connectionFor
+				if modules.NormalizeName(task.Module) == "wait_for_connection" {
+					connect = func(ctx context.Context, task Task, mv map[string]any, st *hostState) (remoteexec.Connection, string, error) {
+						return ec.connectWaiting(ctx, task, mv, st, args)
+					}
+				}
+				conn, dname, cerr := connect(ctx, task, mergedVars, st)
 				delegate = dname
 				if cerr != nil {
 					var unreachable *unreachableError
@@ -2411,6 +2424,95 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 // this host's own connection — wrapped in Become if escalation applies.
 // It also returns the delegate's resolved name, so the result can
 // report WHERE the task ran; empty when the task ran on its own host.
+// waitForConnectionTiming reads the three timings real's own
+// wait_for_connection action plugin reads, with its own defaults
+// (plugins/action/wait_for_connection.py:37, 66-69). connect_timeout is
+// accepted by real and has no counterpart here: this port has no per-dial
+// timeout to set.
+//
+// sleep is clamped to at least a second. Real would `time.sleep(0)` and spin
+// a core for the whole timeout; that is a defect to decline rather than
+// reproduce, and it is the one place this function knowingly differs.
+func waitForConnectionTiming(args map[string]any) (delay, sleep, timeout time.Duration) {
+	intArg := func(k string, def int) int {
+		switch v := args[k].(type) {
+		case int:
+			return v
+		case int64:
+			return int(v)
+		case float64:
+			return int(v)
+		case string:
+			if n, err := strconv.Atoi(v); err == nil {
+				return n
+			}
+		}
+		return def
+	}
+	sleepSec := intArg("sleep", 1)
+	if sleepSec < 1 {
+		sleepSec = 1
+	}
+	return time.Duration(intArg("delay", 0)) * time.Second,
+		time.Duration(sleepSec) * time.Second,
+		time.Duration(intArg("timeout", 600)) * time.Second
+}
+
+// connectWaiting is the retry real's wait_for_connection performs on the
+// CONTROLLER: it dials the host until the task's own timeout instead of
+// letting the first refusal end the task.
+//
+// This is what go-ansible/playbook#195 was about. A host that is rebooting is
+// unreachable by definition, and the engine reported it UNREACHABLE before
+// the module ever ran -- so the one task whose entire purpose is to wait for
+// a host that is not up yet could never do it. The module's own retry loop
+// was already correct and never reached.
+//
+// Real's shape is followed, including checking the deadline BEFORE each
+// attempt (do_until_success_or_timeout, wait_for_connection.py:44-60), so a
+// timeout of 0 dials nothing, and its failure sentence is reused:
+// "timed out waiting for connection port up: <last error>". That phase is
+// real's transport_test; the end-to-end ping that follows it there is this
+// port's module body, which runs once a connection exists.
+func (ec *execCtx) connectWaiting(ctx context.Context, task Task, mergedVars map[string]any, st *hostState, args map[string]any) (remoteexec.Connection, string, error) {
+	delay, sleep, timeout := waitForConnectionTiming(args)
+	if delay > 0 {
+		select {
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	// reconnect is what actually DIALS. connectionFor hands back the
+	// connection the play already holds and re-dials only when the task's
+	// signature changed, so calling it in this loop returns st.conn --
+	// which is nil, with no error, for a host whose first dial failed. The
+	// module then received a nil connection and panicked; that is how this
+	// was found, and it is why the test drives a real play instead of
+	// checking the timings alone.
+	sig := ec.connSignature(task, mergedVars)
+	deadline := time.Now().Add(timeout)
+	var lastErr error = errors.New("no connection attempt was made")
+	for time.Now().Before(deadline) {
+		c, err := ec.reconnect(ctx, st, task, sig, mergedVars)
+		if err == nil {
+			st.conn, st.connErr, st.connSig = c, nil, sig
+			// Through connectionFor, so delegate_to and everything else it
+			// decides still apply; st.conn is set now, so it answers with
+			// this connection rather than dialling again.
+			return ec.connectionFor(ctx, task, mergedVars, st)
+		}
+		lastErr = err
+		st.connErr, st.connSig = err, sig
+		select {
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		case <-time.After(sleep):
+		}
+	}
+	return nil, "", fmt.Errorf("timed out waiting for connection port up: %v", lastErr)
+}
+
 func (ec *execCtx) connectionFor(ctx context.Context, task Task, mergedVars map[string]any, st *hostState) (remoteexec.Connection, string, error) {
 	conn := st.conn
 	// A task whose variables name a different connection gets one.
