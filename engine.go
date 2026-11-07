@@ -2055,7 +2055,17 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			// were dropped here, so a broken expression left the task
 			// reporting whatever the module said — green, on a
 			// condition that never ran.
-			if task.ChangedWhen != "" {
+			//
+			// Both are gated on the task not having been SKIPPED, which
+			// is real's own gate: "# if we didn't skip this task, use
+			// the helpers to evaluate the changed/failed_when
+			// properties / if not utr.skipped:" (ansible-core 2.21.4,
+			// executor/task_executor.py:589-591). A task the check-mode
+			// gate declined to run has no result for a condition to
+			// judge, and evaluating one turned a skip into a changed --
+			// or, with failed_when, into a failure for work that never
+			// happened.
+			if !result.Skipped && task.ChangedWhen != "" {
 				ok, cerr := ec.evalWhen(task.ChangedWhen, condVars)
 				if cerr != nil {
 					result.Failed = true
@@ -2076,7 +2086,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 					result = result.WithExtra("changed_when_result", ok)
 				}
 			}
-			if task.FailedWhen != "" {
+			if !result.Skipped && task.FailedWhen != "" {
 				// NOT gated on the module's own verdict. failed_when
 				// REPLACES it, in both directions -- measured against
 				// ansible-core 2.21.4:
