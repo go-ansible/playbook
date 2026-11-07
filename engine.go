@@ -2026,13 +2026,37 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 			}
 
 			resultView := resultToMap(result)
+			// Real makes attempts available to changed_when/failed_when,
+			// and only when there IS a retry loop: "Make attempts and
+			// retries available early to allow their use in
+			// changed/failed_when; if retries > 1: utr.attempts =
+			// attempt" (ansible-core 2.21.4,
+			// executor/task_executor.py:585-587).
+			if totalAttempts > 1 {
+				resultView["attempts"] = attempt
+			}
+			// The task's OWN register is in scope for both conditionals.
+			// Real applies its REGISTER_VARS layer to task_vars
+			// (task_executor.py:582-583) BEFORE resolving them, so
+			// `failed_when: out.rc != 0` reads the same `out` a later
+			// task will see.
+			//
+			// This port bound the result only as `result`, so a playbook
+			// written the documented way -- naming its own register --
+			// evaluated the condition against an UNDEFINED variable
+			// (#194). withResult already returns a copy, so this writes
+			// into that copy, never into mergedVars.
+			condVars := withResult(mergedVars, resultView)
+			if task.Register != "" {
+				condVars[task.Register] = resultView
+			}
 			// A changed_when:/failed_when: that will not EVALUATE is a
 			// task failure, not something to shrug off. Both errors
 			// were dropped here, so a broken expression left the task
 			// reporting whatever the module said — green, on a
 			// condition that never ran.
 			if task.ChangedWhen != "" {
-				ok, cerr := ec.evalWhen(task.ChangedWhen, withResult(mergedVars, resultView))
+				ok, cerr := ec.evalWhen(task.ChangedWhen, condVars)
 				if cerr != nil {
 					result.Failed = true
 					result.Msg = conditionalFailure("changed_when", cerr)
@@ -2067,7 +2091,7 @@ func (ec *execCtx) runTaskOnHost(ctx context.Context, task Task, st *hostState, 
 				// that had already failed never had its failed_when
 				// evaluated -- which made `failed_when: false`, the
 				// whole reason the keyword exists, do nothing at all.
-				ok, ferr := ec.evalWhen(task.FailedWhen, withResult(mergedVars, resultView))
+				ok, ferr := ec.evalWhen(task.FailedWhen, condVars)
 				if ferr != nil {
 					result.Failed = true
 					result.Msg = conditionalFailure("failed_when", ferr)
