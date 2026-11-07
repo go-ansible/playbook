@@ -580,7 +580,35 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 		}
 	}
 
+	// Real's own order, from Play.compile() (ansible-core 2.21.4,
+	// playbook/play.py:352-358):
+	//
+	//	block_list.extend(self.pre_tasks)
+	//	block_list.append(flush_block)
+	//	block_list.extend(self._compile_roles())
+	//	block_list.extend(self.tasks)
+	//	block_list.append(flush_block)
+	//	block_list.extend(self.post_tasks)
+	//	block_list.append(flush_block)
+	//
+	// pre_tasks come BEFORE the roles. This parser appended the roles
+	// first and then looped pre_tasks/tasks/post_tasks, so a play using
+	// both ran its roles before its pre_tasks (go-ansible/playbook#190) --
+	// backwards for the one thing pre_tasks is for, preparing a host for
+	// the roles that follow.
+	//
+	// NOT reproduced here: the flush_handlers blocks real puts between the
+	// sections. This engine flushes handlers at the end of the play, so a
+	// handler notified by a pre_task still runs later than real runs it.
+	// That is a separate gap, named rather than quietly folded into this
+	// one.
 	var tasks []Task
+	preTasks, err := parseTaskList(ctx, m["pre_tasks"])
+	if err != nil {
+		return p, fmt.Errorf("pre_tasks: %w", err)
+	}
+	tasks = append(tasks, preTasks...)
+
 	if rawRoles, ok := m["roles"]; ok {
 		roleTasks, err := parseRoles(ctx, rawRoles)
 		if err != nil {
@@ -588,7 +616,7 @@ func parsePlay(ctx parseCtx, m map[string]any) (Play, error) {
 		}
 		tasks = append(tasks, roleTasks...)
 	}
-	for _, key := range []string{"pre_tasks", "tasks", "post_tasks"} {
+	for _, key := range []string{"tasks", "post_tasks"} {
 		list, err := parseTaskList(ctx, m[key])
 		if err != nil {
 			return p, fmt.Errorf("%s: %w", key, err)
