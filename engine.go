@@ -1127,12 +1127,23 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 	// alike — as if the block were entirely absent for a host it
 	// excludes, not as a runtime failure (so rescue never runs for a
 	// host the block's when already filtered out).
+	// entering is the host list as it arrived, before the when filter. The
+	// hosts the condition SKIPS have to be handed back to the caller:
+	// "absent for this block" is not "out of the play", and dropping them
+	// from the returned list ended the play for them
+	// (go-ansible/playbook#191). originalActive below is captured AFTER
+	// this filter, which is why it could never carry them.
+	entering := append([]string{}, active...)
+	var whenSkipped []string
 	if task.When != "" {
 		var passed []string
 		for _, h := range active {
 			st := ec.states[h]
 			ok, err := ec.evalWhen(task.When, ec.engine.resolvedFor(st.vc))
 			if err != nil {
+				// A conditional that cannot be evaluated is a failure, and
+				// a failed host DOES leave the play -- so this one is not
+				// restored below.
 				ec.report(pr, Result{Host: h, Task: task.Name, TaskID: task.ID, Failed: true, Msg: conditionalFailure("when", err)})
 				continue
 			}
@@ -1140,12 +1151,15 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 				passed = append(passed, h)
 			} else {
 				ec.report(pr, Result{Host: h, Task: task.Name, TaskID: task.ID, Skipped: true})
+				whenSkipped = append(whenSkipped, h)
 			}
 		}
 		active = passed
 	}
 	if len(active) == 0 {
-		return active
+		// Every host skipped the block. They all continue in the play;
+		// returning `active` here emptied it and the play stopped.
+		return whenSkipped
 	}
 
 	if task.RoleDefaults != nil || task.RoleVars != nil {
@@ -1226,8 +1240,24 @@ func (ec *execCtx) runBlock(ctx context.Context, task Task, active []string, pr 
 		}
 	}
 
+	// Built from `entering` rather than from originalActive so the hosts the
+	// block's own when skipped come back, in the order they arrived. They
+	// did not run the block and they did not fail it; they are simply still
+	// in the play (#191).
+	skipped := make(map[string]bool, len(whenSkipped))
+	for _, h := range whenSkipped {
+		skipped[h] = true
+	}
 	var finalActive []string
-	for _, h := range originalActive {
+	for _, h := range entering {
+		if skipped[h] {
+			finalActive = append(finalActive, h)
+			continue
+		}
+		if !contains(originalActive, h) {
+			// Dropped by the when EVALUATION failing, which is a failure.
+			continue
+		}
 		if !ec.states[h].isFailed() {
 			finalActive = append(finalActive, h)
 		}
