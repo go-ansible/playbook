@@ -1,11 +1,11 @@
 module github.com/go-ansible/playbook
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/go-ansible/facts v0.19.1
 	github.com/go-ansible/inventory v0.19.3
-	github.com/go-ansible/modules v0.101.0
+	github.com/go-ansible/modules v0.102.0
 	github.com/go-ansible/template v0.33.2
 	github.com/go-ansible/vars v0.3.1
 	github.com/go-ansible/vault v0.9.2
@@ -17,8 +17,8 @@ require (
 	github.com/Azure/go-ntlmssp v0.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-encryptions/unixcrypt v0.2.0 // indirect
-	github.com/go-redfish/redfish v0.9.0 // indirect
-	github.com/go-regexp/engine v0.3.2 // indirect
+	github.com/go-redfish/redfish v0.15.0 // indirect
+	github.com/go-regexp/engine v0.4.2 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
